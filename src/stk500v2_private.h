@@ -23,6 +23,11 @@
 #define CMD_OSCCAL                          0x05
 #define CMD_LOAD_ADDRESS                    0x06
 #define CMD_FIRMWARE_UPGRADE                0x07
+#define CMD_SET_WORK_STATE                  0x08        // DFM: set programmer work mode
+#define CMD_SET_PROG_STATE                  0x09        // DFM: set programmer record state, 0 stop, 1 start
+#define CMD_GET_OFFLINE_INFO                0x0A        // DFM: get offline package count and active index
+#define CMD_GET_OFFLINE_PACKAGE             0x0B        // DFM: get one offline package summary
+#define CMD_SET_OFFLINE_ACTIVE              0x0C        // DFM: set active offline package index
 #define CMD_CHECK_TARGET_CONNECTION         0x0D
 #define CMD_LOAD_RC_ID_TABLE                0x0E
 #define CMD_LOAD_EC_ID_TABLE                0x0F
@@ -181,6 +186,10 @@
 #define PARAM_DATA                          0x9D        // STK500 only
 #define PARAM_RESET_POLARITY                0x9E        // STK500 only, and STK600 FW version <= 2.0.3
 #define PARAM_CONTROLLER_INIT               0x9F
+#define PARAM_DEVICE_IDENTITY               0xB6        // DFM: family(1B)+index(2B)+item_id(6B)+item_desc(64B)
+
+#define DFM_ITEM_ID_LEN                     6
+#define DFM_ITEM_DESC_LEN                   64
 
 // STK600 parameters
 #define PARAM_STATUS_TGT_CONN               0xA1
@@ -262,6 +271,21 @@ struct pdata {
   bool suffer_get;
   bool suffer_set;
   unsigned char suffer_data[2];
+
+  // DFM programmer work mode set through CMD_SET_WORK_STATE
+  bool workmode_set;
+  unsigned char workmode_data;
+
+  // DFM offline package management command requested through -x offline=...
+  int offline_action;
+  unsigned short offline_index;
+
+  // DFM device identity sent via PARAM_DEVICE_IDENTITY
+  bool device_id_set;
+  unsigned char device_family;
+  unsigned short device_index;
+  unsigned char device_item_id[DFM_ITEM_ID_LEN];
+  char device_item_desc[DFM_ITEM_DESC_LEN + 1];
 
   // Get/set flags for target power switch
   bool vtarg_switch_get;

@@ -282,11 +282,35 @@ if(HAVE_LINUXGPIO)
 endif()
 
 # -------------------------------------
+# Configure Python virtual environment (if exists)
+# VirtualEnv path: src/python/.venv
+
+set(PYTHON_VENV_PATH "${CMAKE_SOURCE_DIR}/src/python/.venv")
+
+if(EXISTS "${PYTHON_VENV_PATH}")
+    message(STATUS "Python virtual environment found at: ${PYTHON_VENV_PATH}")
+
+    # Configure Python3 to use the virtual environment
+    set(Python3_ROOT_DIR "${PYTHON_VENV_PATH}")
+
+    if(WIN32)
+        set(Python3_EXECUTABLE "${PYTHON_VENV_PATH}/Scripts/python.exe")
+    else()
+        set(Python3_EXECUTABLE "${PYTHON_VENV_PATH}/bin/python")
+    endif()
+
+    message(STATUS "Configured Python from virtual environment: ${Python3_EXECUTABLE}")
+else()
+    message(STATUS "Python virtual environment not found at: ${PYTHON_VENV_PATH}")
+    message(STATUS "To create it, run: python -m venv ${PYTHON_VENV_PATH}")
+endif()
+
+# -------------------------------------
 # Find SWIG/Python3 if needed
 
 if(NOT FORCE_DISABLE_PYTHON_SUPPORT)
     find_package(SWIG 4.0 COMPONENTS python)
-    
+
     if(SWIG_FOUND)
         set(Python3_FIND_STRATEGY LOCATION)
         set(Python3_FIND_UNVERSIONED_NAMES FIRST)
@@ -294,6 +318,9 @@ if(NOT FORCE_DISABLE_PYTHON_SUPPORT)
         if(Python3_FOUND)
             set(HAVE_SWIG 1)
             message(STATUS "Python support enabled")
+            message(STATUS "Python Executable: ${Python3_EXECUTABLE}")
+            message(STATUS "Python Version: ${Python3_VERSION}")
+            message(STATUS "Python Include: ${Python3_INCLUDE_DIRS}")
             execute_process(
                 COMMAND ${Python3_EXECUTABLE} -c "import site; print(site.getsitepackages()[0])" 
                 OUTPUT_VARIABLE PYTHON_SITE_PACKAGES 

@@ -28,6 +28,9 @@ import pathlib
 import re
 import time
 
+scriptdir = pathlib.Path(__file__).resolve().parent
+installdir = scriptdir.parent.parent
+
 builddir = None
 if os.name == 'posix':
     # Linux, *BSD, MacOS
@@ -35,8 +38,8 @@ if os.name == 'posix':
     builddir = f'build_{sysname}/src'
 elif os.name == 'nt':
     # Windows
-    for candidate in ['build_msvc/src', 'build_mingw64/src']:
-        if os.path.exists(candidate):
+    for candidate in [os.getcwd(), 'build_msvc/src', 'build_mingw64/src']:
+        if os.path.exists(os.path.join(candidate, 'swig_avrdude.py')):
             builddir = candidate
             os.add_dll_directory(os.path.realpath(candidate))
             break
@@ -54,11 +57,21 @@ def avrdude_init():
     ad.init_cx()
     ad.init_config()
 
-    found = False
-    for d in [builddir, "/etc", "/usr/local/etc"]:
-        p = pathlib.Path(d + "/avrdude.conf")
+    search_dirs = []
+    for d in [
+        builddir,
+        os.getcwd(),
+        str(installdir / "etc"),
+        "/etc",
+        "/usr/local/etc",
+    ]:
+        if d and d not in search_dirs:
+            search_dirs.append(d)
+
+    for d in search_dirs:
+        p = pathlib.Path(d) / "avrdude.conf"
         if p.is_file():
-            ad.read_config(d + "/avrdude.conf")
+            ad.read_config(str(p))
             return (True, f"Found avrdude.conf in {d}")
 
     return (False, "Sorry, no avrdude.conf could be found.")
@@ -1812,4 +1825,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

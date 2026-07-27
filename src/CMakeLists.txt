@@ -233,6 +233,8 @@ set(SOURCES
     par.h
     pgm.c
     pgm_type.c
+    picpart.c
+    picpart.h
     pickit2.c
     pickit2.h
     pickit5_lut_dw.c

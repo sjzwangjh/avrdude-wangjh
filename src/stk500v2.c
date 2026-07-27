@@ -49,6 +49,11 @@
 
 #include "stk500v2.h"
 #include "stk500v2_private.h"
+
+#define DFM_OFFLINE_ACTION_NONE        0
+#define DFM_OFFLINE_ACTION_INFO        1
+#define DFM_OFFLINE_ACTION_LIST        2
+#define DFM_OFFLINE_ACTION_SET_ACTIVE  3
 #include "usbdevs.h"
 
 /*
@@ -65,6 +70,8 @@
 #include "jtag3.h"
 #define JTAG3_PRIVATE_EXPORTED
 #include "jtag3_private.h"
+
+#include "picpart.h"             // DFM: PIC device lookup via pic10-12-16-init.xml
 
 #define STK500V2_XTAL 7372800U
 #define SCRATCHMONKEY_XTAL 16000000U
@@ -119,6 +126,11 @@ static const struct jtagispentry jtagispcmds[] = {
   // Generic
   {CMD_SET_PARAMETER, 2},
   {CMD_GET_PARAMETER, 3},
+  {CMD_SET_WORK_STATE, 2},
+  {CMD_SET_PROG_STATE, 2},
+  {CMD_GET_OFFLINE_INFO, 8},
+  {CMD_GET_OFFLINE_PACKAGE, 95},
+  {CMD_SET_OFFLINE_ACTIVE, 2},
   {CMD_OSCCAL, 2},
   {CMD_LOAD_ADDRESS, 2},
   // ISP mode
@@ -267,6 +279,11 @@ static unsigned int stk500v2_mode_for_pagesize(unsigned int pagesize);
 
 static double stk500v2_sck_to_us(const PROGRAMMER *pgm, unsigned char dur);
 static int stk500v2_set_sck_period_mk2(const PROGRAMMER *pgm, double v);
+static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p);
+static int stk500v2_set_prog_state(const PROGRAMMER *pgm, unsigned char state);
+static int stk500v2_offline_run_action(const PROGRAMMER *pgm);
+static int stk500v2_parse_itemid_bcd(const char *text, unsigned char out[DFM_ITEM_ID_LEN]);
+static void stk500v2_format_itemid(const unsigned char in[DFM_ITEM_ID_LEN], char *out, size_t outsz);
 
 static int stk600_set_sck_period(const PROGRAMMER *pgm, double v);
 static double stk500v2_fosc_value(const PROGRAMMER *pgm);
@@ -285,6 +302,15 @@ void stk500v2_setup(PROGRAMMER *pgm) {
   my.command_sequence = 1;
   my.boot_start = ULONG_MAX;
   my.xtal = pgmid_is("scratchmonkey")? SCRATCHMONKEY_XTAL: STK500V2_XTAL;
+  my.workmode_set = false;
+  my.workmode_data = 1;
+  my.offline_action = DFM_OFFLINE_ACTION_NONE;
+  my.offline_index = 0;
+  my.device_id_set = false;
+  my.device_family = 0;
+  my.device_index = 0;
+  memset(my.device_item_id, 0, sizeof(my.device_item_id));
+  memset(my.device_item_desc, 0, sizeof(my.device_item_desc));
 }
 
 static void stk500v2_jtagmkII_setup(PROGRAMMER *pgm) {
@@ -1035,6 +1061,11 @@ static int stk500v2_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
     // Activate AVR-style (low active) RESET
     stk500v2_setparm_real(pgm, PARAM_RESET_POLARITY, 0x01);
 
+  // DFM: Only avrdoper sends device identity to the programmer before entering progmode
+  if(str_caseeq(pgm->port, "avrdoper")) {
+    stk500v2_set_device_id(pgm, p);
+  }
+
   tries = 0;
 retry:
   buf[0] = CMD_ENTER_PROGMODE_ISP;
@@ -1285,6 +1316,9 @@ static int stk500v2_initialize(const PROGRAMMER *pgm, const AVRPART *p) {
     usleep(10000);
   }
 
+  if(my.workmode_set && stk500v2_set_prog_state(pgm, 1) < 0)
+    return -1;
+
   return pgm->program_enable(pgm, p);
 }
 
@@ -1432,6 +1466,9 @@ static int stk500v2_jtag3_initialize(const PROGRAMMER *pgm, const AVRPART *p) {
   my.flash_pagecache = mmt_malloc(my.flash_pagesize);
   my.eeprom_pagecache = mmt_malloc(my.eeprom_pagesize);
   my.flash_pageaddr = my.eeprom_pageaddr = ~0UL;
+
+  if(my.workmode_set && stk500v2_set_prog_state(pgm, 1) < 0)
+    return -1;
 
   return pgm->program_enable(pgm, p);
 }
@@ -1615,6 +1652,9 @@ static int stk500hv_initialize(const PROGRAMMER *pgm, const AVRPART *p, enum hvm
   my.flash_pagecache = mmt_malloc(my.flash_pagesize);
   my.eeprom_pagecache = mmt_malloc(my.eeprom_pagesize);
   my.flash_pageaddr = my.eeprom_pageaddr = ~0UL;
+
+  if(my.workmode_set && stk500v2_set_prog_state(pgm, 1) < 0)
+    return -1;
 
   return pgm->program_enable(pgm, p);
 }
@@ -1884,6 +1924,84 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       }
     }
 
+    if(str_starts(extended_param, "workmode=")) {
+      unsigned int mode = 0;
+      int sscanf_success = sscanf(extended_param, "workmode=%u", &mode);
+
+      if(sscanf_success < 1 || mode > 3) {
+        pmsg_error("invalid value in -x %s; use -x workmode=<0..3>\n", extended_param);
+        rv = -1;
+        break;
+      }
+      my.workmode_data = (unsigned char) mode;
+      my.workmode_set = true;
+      continue;
+    }
+
+    if(str_starts(extended_param, "offline=")) {
+      const char *arg = extended_param + strlen("offline=");
+
+      if(str_eq(arg, "info")) {
+        my.offline_action = DFM_OFFLINE_ACTION_INFO;
+        continue;
+      }
+
+      if(str_eq(arg, "list")) {
+        my.offline_action = DFM_OFFLINE_ACTION_LIST;
+        continue;
+      }
+
+      if(str_starts(arg, "active:") || str_starts(arg, "active=")) {
+        unsigned int index = 0;
+        const char *num = arg + strlen("active:");
+        int sscanf_success;
+
+        if(str_starts(arg, "active="))
+          num = arg + strlen("active=");
+
+        sscanf_success = sscanf(num, "%u", &index);
+        if(sscanf_success < 1 || index > 0xffff) {
+          pmsg_error("invalid value in -x %s; use -x offline=active:<index>\n", extended_param);
+          rv = -1;
+          break;
+        }
+
+        my.offline_action = DFM_OFFLINE_ACTION_SET_ACTIVE;
+        my.offline_index = (unsigned short) index;
+        continue;
+      }
+
+      pmsg_error("invalid value in -x %s; use info, list, or active:<index>\n", extended_param);
+      rv = -1;
+      break;
+    }
+
+    if(str_starts(extended_param, "itemid=")) {
+      const char *itemid = extended_param + strlen("itemid=");
+
+      if(stk500v2_parse_itemid_bcd(itemid, my.device_item_id) < 0) {
+        pmsg_error("invalid value in -x %s; use -x itemid=YYMMDDhhmmss\n", extended_param);
+        rv = -1;
+        break;
+      }
+      continue;
+    }
+
+    if(str_starts(extended_param, "itemdisc=")) {
+      const char *itemdisc = extended_param + strlen("itemdisc=");
+      size_t len = strlen(itemdisc);
+
+      if(len > DFM_ITEM_DESC_LEN) {
+        pmsg_error("invalid value in -x %s; itemdisc length must be <= %u bytes\n",
+          extended_param, DFM_ITEM_DESC_LEN);
+        rv = -1;
+        break;
+      }
+      memset(my.device_item_desc, 0, sizeof(my.device_item_desc));
+      memcpy(my.device_item_desc, itemdisc, len);
+      continue;
+    }
+
     if(str_eq(extended_param, "help")) {
       help = true;
       rv = LIBAVRDUDE_EXIT_OK;
@@ -1917,6 +2035,12 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       msg_error("  -x fosc=off       Switch the oscillator clock off\n");
     }
     msg_error("  -x xtal=<n>[unit] Set programmer xtal frequency to <n> Hz (or kHz/MHz)\n");
+    msg_error("  -x workmode=<0..3> Set DFM work mode: 0 simulate, 1 online, 2 record, 3 online+record\n");
+    msg_error("  -x offline=info   Show DFM offline package count and active index\n");
+    msg_error("  -x offline=list   List DFM offline package summaries\n");
+    msg_error("  -x offline=active:<n> Set DFM active offline package index\n");
+    msg_error("  -x itemid=YYMMDDhhmmss Set project ID as 6-byte BCD time stamp\n");
+    msg_error("  -x itemdisc=<text> Set project name/description string, max 64 bytes\n");
     msg_error("  -x help           Show this help menu and exit\n");
     return rv;
   }
@@ -2102,6 +2226,292 @@ static int scratchmonkey_vfy_led(const PROGRAMMER *pgm, int value) {
   return 0;
 }
 
+static int stk500v2_parse_itemid_bcd(const char *text, unsigned char out[DFM_ITEM_ID_LEN]) {
+  size_t i;
+
+  if(text == NULL || out == NULL || strlen(text) != DFM_ITEM_ID_LEN*2)
+    return -1;
+
+  for(i = 0; i < DFM_ITEM_ID_LEN; i++) {
+    unsigned char hi = (unsigned char) text[i*2];
+    unsigned char lo = (unsigned char) text[i*2 + 1];
+
+    if(hi < '0' || hi > '9' || lo < '0' || lo > '9')
+      return -1;
+    out[i] = (unsigned char) (((hi - '0') << 4) | (lo - '0'));
+  }
+
+  return 0;
+}
+
+static void stk500v2_format_itemid(const unsigned char in[DFM_ITEM_ID_LEN], char *out, size_t outsz) {
+  size_t i;
+
+  if(in == NULL || out == NULL || outsz < DFM_ITEM_ID_LEN*2 + 1)
+    return;
+
+  for(i = 0; i < DFM_ITEM_ID_LEN; i++)
+    sprintf(out + i*2, "%01u%01u", (in[i] >> 4) & 0x0f, in[i] & 0x0f);
+  out[DFM_ITEM_ID_LEN*2] = 0;
+}
+
+/*
+ * Send device identity to the programmer via CMD_SET_PARAMETER + PARAM_DEVICE_IDENTITY
+ * SET: CMD_SET_PARAMETER(0x02) + PARAM_DEVICE_IDENTITY(0xB6) + family(1B) + index(2B)
+ * GET: CMD_GET_PARAMETER(0x03) + PARAM_DEVICE_IDENTITY(0xB6) → returns family+index+name
+ */
+static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
+  unsigned char family;
+  unsigned short index;
+  unsigned char sbuf[2 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN];
+  unsigned char gbuf[2 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN + 8];
+  char itemid_text[DFM_ITEM_ID_LEN*2 + 1];
+  char itemdisc_text[DFM_ITEM_DESC_LEN + 1];
+  size_t pos;
+
+  family = 0;
+  if(str_casestarts(p->id, "p") || str_casestarts(p->id, "P")) {
+    family = 1;
+    index = pic_devcode(p->id);
+    if(index == 0xFFFF) {
+      pmsg_warning("PIC device %s not found in pic10-12-16-init.xml, using index=0\n", p->id);
+      index = 0;
+    }
+  } else {
+    family = 0;
+    if(p->avr910_devcode)
+      index = (unsigned short) p->avr910_devcode;
+    else
+      index = (unsigned short) p->stk500_devcode;
+  }
+
+  memset(sbuf, 0, sizeof(sbuf));
+  sbuf[0] = CMD_SET_PARAMETER;
+  sbuf[1] = PARAM_DEVICE_IDENTITY;
+  pos = 2;
+  sbuf[pos++] = family;
+  sbuf[pos++] = index & 0xff;
+  sbuf[pos++] = (index >> 8) & 0xff;
+  memcpy(sbuf + pos, my.device_item_id, DFM_ITEM_ID_LEN);
+  pos += DFM_ITEM_ID_LEN;
+  memcpy(sbuf + pos, my.device_item_desc, DFM_ITEM_DESC_LEN);
+  pos += DFM_ITEM_DESC_LEN;
+
+  if(stk500v2_command(pgm, sbuf, pos, sizeof(sbuf)) < 0) {
+    pmsg_warning("cannot set device identity (family=%d, index=0x%04x)\n", family, index);
+    return -1;
+  }
+
+  memset(gbuf, 0, sizeof(gbuf));
+  gbuf[0] = CMD_GET_PARAMETER;
+  gbuf[1] = PARAM_DEVICE_IDENTITY;
+
+  if(stk500v2_command(pgm, gbuf, 2, sizeof(gbuf)) < 0) {
+    pmsg_warning("cannot get device identity\n");
+    return -1;
+  }
+
+  if(gbuf[2] != family || gbuf[3] != (index & 0xff) || gbuf[4] != ((index >> 8) & 0xff)) {
+    pmsg_warning("device identity mismatch: sent family=%d index=0x%04x, "
+      "got family=%d index=0x%02x%02x\n",
+      family, index, gbuf[2], gbuf[3], gbuf[4]);
+    return -1;
+  }
+
+  stk500v2_format_itemid(my.device_item_id, itemid_text, sizeof(itemid_text));
+
+  if(memcmp(gbuf + 5, my.device_item_id, DFM_ITEM_ID_LEN) != 0) {
+    char rb_itemid[DFM_ITEM_ID_LEN*2 + 1];
+    stk500v2_format_itemid(gbuf + 5, rb_itemid, sizeof(rb_itemid));
+    pmsg_warning("device identity itemid mismatch: sent=%s got=%s\n", itemid_text, rb_itemid);
+    return -1;
+  }
+
+  memset(itemdisc_text, 0, sizeof(itemdisc_text));
+  memcpy(itemdisc_text, gbuf + 5 + DFM_ITEM_ID_LEN, DFM_ITEM_DESC_LEN);
+  itemdisc_text[DFM_ITEM_DESC_LEN] = 0;
+
+  if(memcmp(gbuf + 5 + DFM_ITEM_ID_LEN, my.device_item_desc, DFM_ITEM_DESC_LEN) != 0) {
+    char sent_desc[DFM_ITEM_DESC_LEN + 1];
+    memset(sent_desc, 0, sizeof(sent_desc));
+    memcpy(sent_desc, my.device_item_desc, DFM_ITEM_DESC_LEN);
+    pmsg_warning("device identity itemdisc mismatch: sent=\"%s\" got=\"%s\"\n",
+      sent_desc[0]? sent_desc: "", itemdisc_text[0]? itemdisc_text: "");
+    return -1;
+  }
+
+  pmsg_notice("programmer verified device identity: family=%d index=0x%04x itemid=%s itemdisc=\"%s\"\n",
+    family, index, itemid_text, itemdisc_text[0]? itemdisc_text: "");
+
+  my.device_id_set = true;
+  my.device_family = family;
+  my.device_index = index;
+  return 0;
+}
+
+static const char *stk500v2_workmode_name(unsigned char mode) {
+  switch(mode) {
+  case 0:
+    return "simulate";
+  case 1:
+    return "online";
+  case 2:
+    return "record offline data";
+  case 3:
+    return "online + record offline data";
+  default:
+    return "unknown";
+  }
+}
+
+static int stk500v2_set_state(const PROGRAMMER *pgm, unsigned char mode) {
+  unsigned char buf[32];
+
+  if(mode > 3) {
+    pmsg_error("invalid DFM work mode %u\n", mode);
+    return -1;
+  }
+
+  buf[0] = CMD_SET_WORK_STATE;
+  buf[1] = mode;
+
+  if(stk500v2_command(pgm, buf, 2, sizeof(buf)) < 0) {
+    pmsg_error("unable to set DFM work mode through CMD_SET_WORK_STATE\n");
+    return -1;
+  }
+
+  return 0;
+}
+
+static int stk500v2_set_prog_state(const PROGRAMMER *pgm, unsigned char state) {
+  unsigned char buf[32];
+
+  if(state > 1) {
+    pmsg_error("invalid DFM programmer state %u\n", state);
+    return -1;
+  }
+
+  buf[0] = CMD_SET_PROG_STATE;
+  buf[1] = state;
+
+  if(stk500v2_command(pgm, buf, 2, sizeof(buf)) < 0) {
+    pmsg_error("unable to set DFM programmer state through CMD_SET_PROG_STATE\n");
+    return -1;
+  }
+
+  return 0;
+}
+
+static unsigned int dfm_get_u16(const unsigned char *p) {
+  return (unsigned int) p[0] | ((unsigned int) p[1] << 8);
+}
+
+static unsigned long dfm_get_u32(const unsigned char *p) {
+  return (unsigned long) p[0] |
+    ((unsigned long) p[1] << 8) |
+    ((unsigned long) p[2] << 16) |
+    ((unsigned long) p[3] << 24);
+}
+
+static void dfm_put_u16(unsigned char *p, unsigned int v) {
+  p[0] = v & 0xff;
+  p[1] = (v >> 8) & 0xff;
+}
+
+static int stk500v2_offline_get_info(const PROGRAMMER *pgm,
+  unsigned int *count, unsigned int *active, unsigned int *max_count) {
+  unsigned char buf[32];
+  int result;
+
+  memset(buf, 0, sizeof(buf));
+  buf[0] = CMD_GET_OFFLINE_INFO;
+  result = stk500v2_command(pgm, buf, 1, sizeof(buf));
+  if(result < 8)
+    return -1;
+
+  *count = dfm_get_u16(&buf[2]);
+  *active = dfm_get_u16(&buf[4]);
+  *max_count = dfm_get_u16(&buf[6]);
+  return 0;
+}
+
+static int stk500v2_offline_print_summary(const PROGRAMMER *pgm, unsigned int index) {
+  unsigned char buf[160];
+  char itemid[DFM_ITEM_ID_LEN*2 + 1];
+  char itemdesc[DFM_ITEM_DESC_LEN + 1];
+  unsigned int used, state, pkg_index, arch, dev_index;
+  unsigned long flash_addr, total_size, packet_count, crc32;
+  int result;
+
+  memset(buf, 0, sizeof(buf));
+  buf[0] = CMD_GET_OFFLINE_PACKAGE;
+  dfm_put_u16(&buf[1], index);
+  result = stk500v2_command(pgm, buf, 3, sizeof(buf));
+  if(result < 95)
+    return -1;
+
+  used = buf[2];
+  state = buf[3];
+  pkg_index = dfm_get_u16(&buf[4]);
+  flash_addr = dfm_get_u32(&buf[6]);
+  total_size = dfm_get_u32(&buf[10]);
+  packet_count = dfm_get_u32(&buf[14]);
+  crc32 = dfm_get_u32(&buf[18]);
+  arch = buf[22];
+  dev_index = dfm_get_u16(&buf[23]);
+
+  if(!(used == 1 && state == 2))
+    return 0;
+
+  stk500v2_format_itemid(&buf[25], itemid, sizeof(itemid));
+  memset(itemdesc, 0, sizeof(itemdesc));
+  memcpy(itemdesc, &buf[25 + DFM_ITEM_ID_LEN], DFM_ITEM_DESC_LEN);
+
+  pmsg_notice("offline package %u: arch=%u device=0x%04x packets=%lu size=%lu flash=0x%08lx crc=0x%08lx itemid=%s itemdisc=\"%s\"\n",
+    pkg_index, arch, dev_index, packet_count, total_size, flash_addr, crc32,
+    itemid, itemdesc[0]? itemdesc: "");
+  return 0;
+}
+
+static int stk500v2_offline_set_active(const PROGRAMMER *pgm, unsigned int index) {
+  unsigned char buf[16];
+
+  memset(buf, 0, sizeof(buf));
+  buf[0] = CMD_SET_OFFLINE_ACTIVE;
+  dfm_put_u16(&buf[1], index);
+  if(stk500v2_command(pgm, buf, 3, sizeof(buf)) < 0)
+    return -1;
+
+  pmsg_notice("DFM active offline package set to %u\n", index);
+  return 0;
+}
+
+static int stk500v2_offline_run_action(const PROGRAMMER *pgm) {
+  unsigned int count, active, max_count;
+
+  if(my.offline_action == DFM_OFFLINE_ACTION_NONE)
+    return 0;
+
+  if(my.offline_action == DFM_OFFLINE_ACTION_SET_ACTIVE)
+    return stk500v2_offline_set_active(pgm, my.offline_index);
+
+  if(stk500v2_offline_get_info(pgm, &count, &active, &max_count) < 0)
+    return -1;
+
+  if(active == 0xffff)
+    pmsg_notice("DFM offline packages: %u/%u, active=none\n", count, max_count);
+  else
+    pmsg_notice("DFM offline packages: %u/%u, active=%u\n", count, max_count, active);
+
+  if(my.offline_action == DFM_OFFLINE_ACTION_LIST) {
+    for(unsigned int i = 0; i < max_count; i++)
+      if(stk500v2_offline_print_summary(pgm, i) < 0)
+        return -1;
+  }
+
+  return 0;
+}
+
 static int stk500v2_open(PROGRAMMER *pgm, const char *port) {
   union pinfo pinfo = {.serialinfo.baud = 115200,.serialinfo.cflags = SERIAL_8N1 };
 
@@ -2162,6 +2572,16 @@ static int stk500v2_open(PROGRAMMER *pgm, const char *port) {
 
   // Drain any extraneous input, synchronise and drain again
   if(stk500v2_drain(pgm, 0) < 0 || stk500v2_getsync(pgm) < 0 || stk500v2_drain(pgm, 0) < 0)
+    return -1;
+
+  if(my.workmode_set) {
+    if(stk500v2_set_state(pgm, my.workmode_data) < 0)
+      return -1;
+    pmsg_notice("DFM work mode set to %u (%s) through CMD_SET_WORK_STATE\n",
+      my.workmode_data, stk500v2_workmode_name(my.workmode_data));
+  }
+
+  if(stk500v2_offline_run_action(pgm) < 0)
     return -1;
 
   if(pgm->bitclock) {
@@ -2236,6 +2656,9 @@ static int stk600_open(PROGRAMMER *pgm, const char *port) {
 
 static void stk500v2_close(PROGRAMMER *pgm) {
   DEBUG("STK500V2: stk500v2_close()\n");
+
+  if(my.workmode_set && pgm->fd.ifd >= 0)
+    (void) stk500v2_set_prog_state(pgm, 0);
 
   serial_close(&pgm->fd);
   pgm->fd.ifd = -1;
@@ -3783,6 +4206,12 @@ static void stk500v2_print_parms1(const PROGRAMMER *pgm, const char *p, FILE *fp
   double f;
   int decimals;
   const char *unit;
+  unsigned char workmode = 0xff;
+
+  if(my.workmode_set) {
+    workmode = my.workmode_data;
+    fmsg_out(fp, "%sDFM work mode         : %u (%s)\n", p, workmode, stk500v2_workmode_name(workmode));
+  }
 
   if(pgm->extra_features & HAS_VTARG_READ && my.pgmtype != PGMTYPE_JTAGICE3) {
     fmsg_out(fp, "%sVtarget               : %.1f V\n", p, stk500v2_vtarget_value(pgm));
