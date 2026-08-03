@@ -145,6 +145,10 @@ PROGRAMMER *pgm_new(void) {
   pgm->cp_eeprom = mmt_malloc(sizeof(AVR_Cache));
   pgm->cp_bootrow = mmt_malloc(sizeof(AVR_Cache));
   pgm->cp_usersig = mmt_malloc(sizeof(AVR_Cache));
+  memset(pgm->cp_flash, 0, sizeof(AVR_Cache));
+  memset(pgm->cp_eeprom, 0, sizeof(AVR_Cache));
+  memset(pgm->cp_bootrow, 0, sizeof(AVR_Cache));
+  memset(pgm->cp_usersig, 0, sizeof(AVR_Cache));
 
   // Default values
   pgm->initpgm = NULL;
