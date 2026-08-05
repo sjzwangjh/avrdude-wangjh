@@ -65,6 +65,9 @@
 #define USBASP_NIBOBEE_VID                   0x16C0 // VOTI
 #define USBASP_NIBOBEE_PID                   0x092F // NIBObee PID
 
+#define USB_VENDOR_AVRDOPER                  0x16C0 // VOTI
+#define USB_DEVICE_AVRDOPER                  0x05DF // AVR-Doper shared PID
+
 /*
  * These are specifically assigned to USBtiny, if you need your own VID and
  * PIDs you can get them for cheap from www.mecanique.co.uk so please don't
@@ -77,6 +80,10 @@
 #define USBDEV_BULK_EP_WRITE_MKII 0x02
 #define USBDEV_BULK_EP_READ_MKII  0x82
 #define USBDEV_MAX_XFER_MKII 64
+
+// STM32 AVR-Doper WinUSB bulk interface
+#define USBDEV_BULK_EP_WRITE_AVRDOPER 0x04
+#define USBDEV_BULK_EP_READ_AVRDOPER  0x84
 
 // STK600
 #define USBDEV_BULK_EP_WRITE_STK600 0x02

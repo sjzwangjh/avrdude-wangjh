@@ -23,9 +23,15 @@
 #include <ac_cfg.h>
 
 #if defined(HAVE_LIBHIDAPI)
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 #include <hidapi/hidapi.h>
 
 #include "avrdude.h"
@@ -49,18 +55,117 @@
 
 #define USB_VENDOR_ID   0x16c0
 #define USB_PRODUCT_ID  0x05df
+#define USB_INTERFACE_AVRDOPER_HID 0
+
+static const char *usb_casestr(const char *haystack, const char *needle) {
+  size_t needle_len;
+
+  if(haystack == NULL || needle == NULL)
+    return NULL;
+
+  needle_len = strlen(needle);
+  if(needle_len == 0)
+    return haystack;
+
+  for(; *haystack != 0; haystack++) {
+    size_t i;
+
+    for(i = 0; i < needle_len; i++) {
+      unsigned char h = (unsigned char) haystack[i];
+      unsigned char n = (unsigned char) needle[i];
+
+      if(h == 0)
+        return NULL;
+      if(tolower(h) != tolower(n))
+        break;
+    }
+    if(i == needle_len)
+      return haystack;
+  }
+
+  return NULL;
+}
+
+static int usb_path_matches_interface(const char *path, int interface_number) {
+  char needle[16];
+
+  if(path == NULL)
+    return 0;
+
+  snprintf(needle, sizeof needle, "&mi_%02x", interface_number & 0xff);
+  return usb_casestr(path, needle) != NULL;
+}
 
 static const int reportDataSizes[4] = { 13, 29, 61, 125 };
+
+/*
+ * AVR-Doper's original HID transport defines up to 125 bytes of payload per
+ * feature report. On this STM32 composite implementation, short commands are
+ * stable but long programming frames can wedge the HID path. Keep each HID
+ * feature transfer within a single 64-byte control packet (61 data bytes plus
+ * report ID and length) to match the device-side buffering more conservatively.
+ */
+#define AVRDOPER_HID_SAFE_DATA_SIZE 61
+#define AVRDOPER_HID_IO_RETRIES 5
+
+static void avrdoper_sleep_ms(unsigned int ms) {
+#if defined(_WIN32)
+  Sleep(ms);
+#else
+  struct timespec req;
+
+  req.tv_sec = ms / 1000;
+  req.tv_nsec = (long) (ms % 1000) * 1000000L;
+  nanosleep(&req, NULL);
+#endif
+}
 
 // ------------------------------------------------------------------------
 
 static int usbOpenDevice(union filedescriptor *fdp, int vendor, const char *vendorName,
   int product, const char *productName, int doReportIDs) {
+  struct hid_device_info *list;
+  struct hid_device_info *devinfo;
   hid_device *dev;
 
-  dev = hid_open(vendor, product, NULL);
+  (void) vendorName;
+  (void) productName;
+  (void) doReportIDs;
+
+  list = hid_enumerate(vendor, product);
+  if(list == NULL) {
+    pmsg_ext_error("no HID device found for %04x:%04x\n", vendor, product);
+    return USB_ERROR_NOTFOUND;
+  }
+
+  dev = NULL;
+  for(devinfo = list; devinfo != NULL; devinfo = devinfo->next) {
+    msg_trace("HID candidate path=%s interface=%d usage_page=0x%04x usage=0x%04x\n",
+      devinfo->path != NULL? devinfo->path: "(null)",
+      devinfo->interface_number,
+      devinfo->usage_page,
+      devinfo->usage);
+
+    if(devinfo->interface_number >= 0 && devinfo->interface_number != USB_INTERFACE_AVRDOPER_HID)
+      continue;
+
+    if(devinfo->interface_number < 0 && !usb_path_matches_interface(devinfo->path, USB_INTERFACE_AVRDOPER_HID))
+      continue;
+
+    dev = hid_open_path(devinfo->path);
+    if(dev == NULL) {
+      pmsg_error("unable to open HID path %s: %ls\n",
+        devinfo->path != NULL? devinfo->path: "(null)",
+        hid_error(NULL));
+      continue;
+    }
+    break;
+  }
+
+  hid_free_enumeration(list);
   if(dev == NULL) {
-    pmsg_ext_error("no device found\n");
+    pmsg_ext_error("no matching avrdoper HID interface found for %04x:%04x (MI_%02x)\n",
+      vendor, product, USB_INTERFACE_AVRDOPER_HID);
     return USB_ERROR_NOTFOUND;
   }
   fdp->usb.handle = dev;
@@ -85,15 +190,29 @@ static void usbCloseDevice(union filedescriptor *fdp) {
 static int usbSetReport(const union filedescriptor *fdp, int reportType, char *buffer, int len) {
   hid_device *udev = (hid_device *) fdp->usb.handle;
   int bytesSent = -1;
+  int attempt;
 
-  switch(reportType) {
-  case USB_HID_REPORT_TYPE_INPUT:
-    break;
-  case USB_HID_REPORT_TYPE_OUTPUT:
-    bytesSent = hid_write(udev, (unsigned char *) buffer, len);
-    break;
-  case USB_HID_REPORT_TYPE_FEATURE:
-    bytesSent = hid_send_feature_report(udev, (unsigned char *) buffer, len);
+  for(attempt = 0; attempt < AVRDOPER_HID_IO_RETRIES; attempt++) {
+    switch(reportType) {
+    case USB_HID_REPORT_TYPE_INPUT:
+      break;
+    case USB_HID_REPORT_TYPE_OUTPUT:
+      bytesSent = hid_write(udev, (unsigned char *) buffer, len);
+      break;
+    case USB_HID_REPORT_TYPE_FEATURE:
+      bytesSent = hid_send_feature_report(udev, (unsigned char *) buffer, len);
+      break;
+    }
+
+    if(bytesSent == len)
+      return USB_ERROR_NONE;
+
+    if(bytesSent < 0 && attempt + 1 < AVRDOPER_HID_IO_RETRIES) {
+      msg_notice2("avrdoper HID send retry %d/%d after error: %ls\n",
+        attempt + 1, AVRDOPER_HID_IO_RETRIES, hid_error(udev));
+      avrdoper_sleep_ms(2);
+      continue;
+    }
     break;
   }
 
@@ -110,19 +229,38 @@ static int usbSetReport(const union filedescriptor *fdp, int reportType, char *b
 static int usbGetReport(const union filedescriptor *fdp, int reportType, int reportNumber, char *buffer, int *len) {
   hid_device *udev = (hid_device *) fdp->usb.handle;
   int bytesReceived = -1;
+  int requestLen = *len;
+  int attempt;
 
-  switch(reportType) {
-  case USB_HID_REPORT_TYPE_INPUT:
-    buffer[0] = reportNumber;
-    bytesReceived = hid_read_timeout(udev, (unsigned char *) buffer, *len, 300);
-    break;
-  case USB_HID_REPORT_TYPE_OUTPUT:
-    break;
-  case USB_HID_REPORT_TYPE_FEATURE:
-    buffer[0] = reportNumber;
-    bytesReceived = hid_get_feature_report(udev, (unsigned char *) buffer, *len);
+  for(attempt = 0; attempt < AVRDOPER_HID_IO_RETRIES; attempt++) {
+    *len = requestLen;
+    switch(reportType) {
+    case USB_HID_REPORT_TYPE_INPUT:
+      buffer[0] = reportNumber;
+      bytesReceived = hid_read_timeout(udev, (unsigned char *) buffer, *len, 500);
+      break;
+    case USB_HID_REPORT_TYPE_OUTPUT:
+      break;
+    case USB_HID_REPORT_TYPE_FEATURE:
+      buffer[0] = reportNumber;
+      bytesReceived = hid_get_feature_report(udev, (unsigned char *) buffer, *len);
+      break;
+    }
+
+    if(bytesReceived >= 0) {
+      *len = bytesReceived;
+      return USB_ERROR_NONE;
+    }
+
+    if(attempt + 1 < AVRDOPER_HID_IO_RETRIES) {
+      msg_notice2("avrdoper HID recv retry %d/%d after error: %ls\n",
+        attempt + 1, AVRDOPER_HID_IO_RETRIES, hid_error(udev));
+      avrdoper_sleep_ms(2);
+      continue;
+    }
     break;
   }
+
   if(bytesReceived < 0) {
     pmsg_error("unable to send message: %ls\n", hid_error(udev));
     return USB_ERROR_IO;
@@ -213,9 +351,10 @@ static void avrdoper_close(union filedescriptor *fdp) {
 
 static int chooseDataSize(int len) {
   size_t i;
+  int capped_len = len > AVRDOPER_HID_SAFE_DATA_SIZE? AVRDOPER_HID_SAFE_DATA_SIZE: len;
 
   for(i = 0; i < sizeof(reportDataSizes)/sizeof(reportDataSizes[0]); i++) {
-    if(reportDataSizes[i] >= len)
+    if(reportDataSizes[i] >= capped_len)
       return i;
   }
   return i - 1;
@@ -242,6 +381,7 @@ static int avrdoper_send(const union filedescriptor *fdp, const unsigned char *b
       pmsg_error("USB %s\n", usbErrorText(rval));
       return -1;
     }
+    avrdoper_sleep_ms(1);
     buflen -= thisLen;
     buf += thisLen;
   }

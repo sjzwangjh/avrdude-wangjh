@@ -32,24 +32,44 @@ scriptdir = pathlib.Path(__file__).resolve().parent
 installdir = scriptdir.parent.parent
 
 builddir = None
+build_candidates = []
 if os.name == 'posix':
     # Linux, *BSD, MacOS
     sysname = os.uname()[0].lower()
-    builddir = f'build_{sysname}/src'
+    build_candidates = [
+        pathlib.Path.cwd() / f'build_{sysname}/src',
+        scriptdir.parent.parent / f'build_{sysname}/src',
+        installdir / f'build_{sysname}/src',
+    ]
 elif os.name == 'nt':
     # Windows
-    for candidate in [os.getcwd(), 'build_msvc/src', 'build_mingw64/src']:
-        if os.path.exists(os.path.join(candidate, 'swig_avrdude.py')):
-            builddir = candidate
-            os.add_dll_directory(os.path.realpath(candidate))
-            break
+    build_candidates = [
+        pathlib.Path.cwd() / 'out/build/x64-Release/src',
+        pathlib.Path.cwd() / 'out/build/x64-Debug/src',
+        pathlib.Path.cwd(),
+        pathlib.Path.cwd() / 'build_msvc/src',
+        pathlib.Path.cwd() / 'build_mingw64/src',
+        scriptdir.parent.parent / 'out/build/x64-Release/src',
+        scriptdir.parent.parent / 'out/build/x64-Debug/src',
+        installdir / 'build_msvc/src',
+        installdir / 'build_mingw64/src',
+    ]
+
+for candidate in build_candidates:
+    candidate = pathlib.Path(candidate).resolve()
+    if (candidate / 'swig_avrdude.py').exists():
+        builddir = str(candidate)
+        if os.name == 'nt':
+            os.add_dll_directory(builddir)
+        break
 
 if builddir == None:
     #print("Cannot determine build directory, module loading might fail.", file=sys.stderr)
     pass
 else:
-    sys.path.append(builddir)
-    sys.path.append(builddir + '/python')
+    # Prepend so a stale .venv/site-packages copy does not shadow the fresh build.
+    sys.path.insert(0, builddir)
+    sys.path.insert(0, builddir + '/python')
 
 import swig_avrdude as ad
 
@@ -629,6 +649,7 @@ class adgui(QObject):
             self.programmer.other.stateChanged.connect(self.update_programmer_cb)
             self.programmer.buttonBox.accepted.connect(self.programmer_selected)
             self.programmer.programmers.currentTextChanged.connect(self.programmer_update_port)
+            self.programmer.port.textChanged.connect(self.programmer_port_changed)
             self.adgui.actionDevice_Info.triggered.connect(self.devinfo.show)
             self.adgui.actionProgramming.triggered.connect(self.memories.show)
             self.memories.readSig.pressed.connect(self.read_signature)
@@ -638,13 +659,14 @@ class adgui(QObject):
             self.memories.save.pressed.connect(self.flash_save)
             self.memories.load.pressed.connect(self.flash_load)
             self.memories.erase.pressed.connect(self.chip_erase)
-            self.memories.clear.pressed.connect(self.clear_buffer)
+            self.memories.clear.pressed.connect(self.clear_flash_buffer)
             self.memories.filename.editingFinished.connect(self.detect_flash_file)
             self.memories.ee_choose.pressed.connect(self.ask_eeprom_file)
             self.memories.ee_read.pressed.connect(self.eeprom_read)
             self.memories.ee_program.pressed.connect(self.eeprom_write)
             self.memories.ee_save.pressed.connect(self.eeprom_save)
             self.memories.ee_load.pressed.connect(self.eeprom_load)
+            self.memories.ee_clear.pressed.connect(self.clear_eeprom_buffer)
             self.memories.ee_filename.editingFinished.connect(self.detect_eeprom_file)
             self.memories.fuse_choose.pressed.connect(self.ask_fuses_file)
             self.memories.fuse_read.pressed.connect(self.read_fuses)
@@ -668,6 +690,20 @@ class adgui(QObject):
 
         self.buffer_empty = 'background-color: rgb(255,240,240);'
         self.buffer_full = 'background-color: rgb(240,255,240);'
+        self.update_flash_buffer_view(0)
+        self.update_eeprom_buffer_view(0)
+
+    def update_flash_buffer_view(self, size):
+        text = "Empty" if size <= 0 else f"Loaded\n{size} bytes"
+        self.memories.buffer.setText(text)
+        self.memories.buffer.setToolTip("Flash memory buffer status")
+        self.memories.buffer.setStyleSheet(self.buffer_empty if size <= 0 else self.buffer_full)
+
+    def update_eeprom_buffer_view(self, size):
+        text = "Empty" if size <= 0 else f"Loaded\n{size} bytes"
+        self.memories.ee_buffer.setText(text)
+        self.memories.ee_buffer.setToolTip("EEPROM memory buffer status")
+        self.memories.ee_buffer.setStyleSheet(self.buffer_empty if size <= 0 else self.buffer_full)
 
     def log(self, s: str, level: int = ad.MSG_INFO, no_nl: bool = False):
         # level to color mapping
@@ -841,6 +877,12 @@ class adgui(QObject):
                 self.port = n
                 self.programmer.port.setText(n)
                 self.log(f"Port set to {n}")
+            if 'file/flash' in k:
+                n = s.value('file/flash')
+                if n:
+                    self.memories.filename.setText(n)
+                    self.detect_flash_file()
+                    self.log(f"Flash file set to {n}", ad.MSG_INFO)
             if self.port != "set_this" and self.pgm and self.dev:
                 self.adgui.actionAttach.setEnabled(True)
 
@@ -938,12 +980,24 @@ class adgui(QObject):
             self.adgui.actionAttach.setEnabled(True)
 
     def programmer_selected(self):
-        self.prog_selected = self.programmer.programmers.currentText()
-        self.pgm = ad.locate_programmer(ad.cvar.programmers, self.prog_selected)
-        if not self.pgm:
-            self.log(f"Invalid programmer selection: {self.prog_selected}")
+        new_prog_selected = self.programmer.programmers.currentText()
+        new_pgm = ad.locate_programmer(ad.cvar.programmers, new_prog_selected)
+        if not new_pgm:
+            self.log(f"Invalid programmer selection: {new_prog_selected}")
             return
-        self.port = self.programmer.port.text()
+        new_port = self.programmer.port.text().strip()
+        reconnect_required = self.connected and (
+            self.prog_selected != new_prog_selected or self.port != new_port
+        )
+
+        if reconnect_required:
+            self.log("Programmer or port changed; disconnecting current session first",
+                     ad.MSG_NOTICE)
+            self.stop_programmer()
+
+        self.prog_selected = new_prog_selected
+        self.pgm = new_pgm
+        self.port = new_port
         self.log(f"Selected programmer: {self.pgm.desc} ({self.prog_selected})")
         self.settings.setValue('file/programmer', self.prog_selected)
         self.log(f"Selected port: {self.port}")
@@ -963,6 +1017,20 @@ class adgui(QObject):
             self.programmer.port.clear()
             self.programmer.port.insert("dummy")
 
+    def programmer_port_changed(self, text: str):
+        new_port = text.strip()
+        reconnect_required = self.connected and self.port not in (None, new_port)
+
+        self.port = new_port
+        self.settings.setValue('file/port', self.port)
+
+        if reconnect_required:
+            self.log("Port changed; disconnecting current session first", ad.MSG_NOTICE)
+            self.stop_programmer()
+
+        if self.port != "set_this" and self.prog_selected and self.dev_selected:
+            self.adgui.actionAttach.setEnabled(True)
+
     def loglevel_changed(self, checked: bool):
         btn = self.sender()
         if checked:
@@ -973,6 +1041,8 @@ class adgui(QObject):
 
     def start_programmer(self):
         if self.connected:
+            self.log('Programmer is already connected; detach before reconnecting',
+                     ad.MSG_WARNING)
             return
         ad.init_cx(self.pgm)
         self.pgm.initpgm()
@@ -1048,14 +1118,17 @@ class adgui(QObject):
         # If file exists, try finding out real format. If file doesn't
         # exist, try guessing the intended file format based on the
         # suffix.
-        fname = self.memories.filename.text()
+        fname = self.memories.filename.text().strip()
+        self.memories.filename.setText(fname)
         if len(fname) > 0:
             self.flashname = fname
+            self.settings.setValue('file/flash', fname)
             self.memories.load.setEnabled(True)
             self.memories.save.setEnabled(True)
         else:
             # no filename, disable load/save buttons
             self.flashname = None
+            self.settings.remove('file/flash')
             self.memories.load.setEnabled(False)
             self.memories.save.setEnabled(False)
             return
@@ -1086,8 +1159,7 @@ class adgui(QObject):
         amnt = ad.avr_read_mem(self.pgm, self.dev, m)
         self.flash_size = amnt
         self.log(f"Read {amnt} bytes")
-        if amnt > 0:
-            self.memories.buffer.setStyleSheet(self.buffer_full)
+        self.update_flash_buffer_view(amnt)
 
     def flash_write(self):
         self.adgui.progressBar.setEnabled(True)
@@ -1101,7 +1173,7 @@ class adgui(QObject):
         amnt = ad.avr_write_mem(self.pgm, self.dev, m, self.flash_size)
         self.log(f"Programmed {amnt} bytes")
 
-    def clear_buffer(self):
+    def clear_flash_buffer(self):
         m = ad.avr_locate_mem(self.dev, 'flash')
         if not m:
             self.log("Could not find 'flash' memory", ad.MSG_ERROR)
@@ -1109,7 +1181,7 @@ class adgui(QObject):
         m.clear(m.size)
         self.log(f"Cleared {m.size} bytes of buffer, and allocation flags")
         self.flash_size = 0
-        self.memories.buffer.setStyleSheet(self.buffer_empty)
+        self.update_flash_buffer_view(0)
 
     def flash_save(self):
         if self.memories.ffAuto.isChecked() or \
@@ -1157,8 +1229,7 @@ class adgui(QObject):
         amnt = ad.fileio(ad.FIO_READ, self.flashname, fmt, self.dev, "flash", -1)
         self.log(f"Read {amnt} bytes from {self.flashname}")
         self.flash_size = amnt
-        if amnt > 0:
-            self.memories.buffer.setStyleSheet(self.buffer_full)
+        self.update_flash_buffer_view(amnt)
 
     def chip_erase(self):
         result = QMessageBox.question(self.memories,
@@ -1170,7 +1241,7 @@ class adgui(QObject):
         if result == 0:
             self.log("Device erased")
             self.flash_size = 0
-            self.memories.buffer.setStyleSheet(self.buffer_empty)
+            self.update_flash_buffer_view(0)
         else:
             self.log("Failed to erase device", ad.MSG_WARNING)
 
@@ -1242,8 +1313,7 @@ class adgui(QObject):
         amnt = ad.avr_read_mem(self.pgm, self.dev, m)
         self.eeprom_size = amnt
         self.log(f"Read {amnt} bytes")
-        if amnt > 0:
-            self.memories.ee_buffer.setStyleSheet(self.buffer_full)
+        self.update_eeprom_buffer_view(amnt)
 
     def eeprom_write(self):
         self.adgui.progressBar.setEnabled(True)
@@ -1257,7 +1327,7 @@ class adgui(QObject):
         amnt = ad.avr_write_mem(self.pgm, self.dev, m, self.eeprom_size)
         self.log(f"Programmed {amnt} bytes")
 
-    def clear_buffer(self):
+    def clear_eeprom_buffer(self):
         m = ad.avr_locate_mem(self.dev, 'eeprom')
         if not m:
             self.log("Could not find 'eeprom' memory", ad.MSG_ERROR)
@@ -1265,7 +1335,7 @@ class adgui(QObject):
         m.clear(m.size)
         self.log(f"Cleared {m.size} bytes of buffer, and allocation flags")
         self.eeprom_size = 0
-        self.memories.ee_buffer.setStyleSheet(self.buffer_empty)
+        self.update_eeprom_buffer_view(0)
 
     def eeprom_save(self):
         if self.memories.ee_ffAuto.isChecked() or \
@@ -1313,8 +1383,7 @@ class adgui(QObject):
         amnt = ad.fileio(ad.FIO_READ, self.eepromname, fmt, self.dev, "eeprom", -1)
         self.log(f"Read {amnt} bytes from {self.eepromname}")
         self.eeprom_size = amnt
-        if amnt > 0:
-            self.memories.ee_buffer.setStyleSheet(self.buffer_full)
+        self.update_eeprom_buffer_view(amnt)
 
     def disable_fuses(self):
         # make all fuse labels and entries invisible

@@ -51,6 +51,31 @@ static PyObject *msg_cb = NULL;
 static PyObject *progress_cb = NULL;
 static void swig_progress(int percent, double etime, const char *hdr, int finish);
 
+static PyObject *swig_safe_unicode(const char *s) {
+  PyObject *obj;
+  Py_ssize_t len;
+
+  if (!s)
+    return PyUnicode_FromString("");
+
+  len = (Py_ssize_t) strlen(s);
+  obj = PyUnicode_DecodeUTF8(s, len, "surrogateescape");
+  if (obj)
+    return obj;
+
+  PyErr_Clear();
+#if defined(_WIN32)
+  obj = PyUnicode_DecodeMBCS(s, len, "replace");
+#else
+  obj = PyUnicode_DecodeLocaleAndSize(s, len, "surrogateescape");
+#endif
+  if (obj)
+    return obj;
+
+  PyErr_Clear();
+  return PyUnicode_FromString("<decode error>");
+}
+
 void set_msg_callback(PyObject *PyFunc) {
   if (PyFunc == Py_None) {
     if (msg_cb)
@@ -126,9 +151,37 @@ int avrdude_message2(FILE *fp, int lno, const char *file,
 
     if (*p) {
       if (msg_cb) {
-        PyObject *result =
-          PyObject_CallFunction(msg_cb, "(sissiisO)",
-                                target, lno, file, func, msgmode, msglvl, p, backslash_v);
+        PyObject *py_target = swig_safe_unicode(target);
+        PyObject *py_file = swig_safe_unicode(file);
+        PyObject *py_func = swig_safe_unicode(func);
+        PyObject *py_msg = swig_safe_unicode(p);
+        PyObject *py_lno = PyLong_FromLong(lno);
+        PyObject *py_msgmode = PyLong_FromLong(msgmode);
+        PyObject *py_msglvl = PyLong_FromLong(msglvl);
+        PyObject *result = NULL;
+
+        if (py_target && py_file && py_func && py_msg && py_lno && py_msgmode && py_msglvl) {
+          result = PyObject_CallFunctionObjArgs(
+            msg_cb,
+            py_target,
+            py_lno,
+            py_file,
+            py_func,
+            py_msgmode,
+            py_msglvl,
+            py_msg,
+            backslash_v,
+            NULL
+          );
+        }
+
+        Py_XDECREF(py_target);
+        Py_XDECREF(py_file);
+        Py_XDECREF(py_func);
+        Py_XDECREF(py_msg);
+        Py_XDECREF(py_lno);
+        Py_XDECREF(py_msgmode);
+        Py_XDECREF(py_msglvl);
         Py_XDECREF(result);
       }
       free(p);
@@ -140,8 +193,27 @@ int avrdude_message2(FILE *fp, int lno, const char *file,
 static void swig_progress(int percent, double etime, const char *hdr, int finish)
 {
   if (progress_cb) {
-    PyObject *result =
-      PyObject_CallFunction(progress_cb, "(idsi)", percent, etime, hdr, finish);
+    PyObject *py_hdr = swig_safe_unicode(hdr);
+    PyObject *py_percent = PyLong_FromLong(percent);
+    PyObject *py_etime = PyFloat_FromDouble(etime);
+    PyObject *py_finish = PyLong_FromLong(finish);
+    PyObject *result = NULL;
+
+    if (py_hdr && py_percent && py_etime && py_finish) {
+      result = PyObject_CallFunctionObjArgs(
+        progress_cb,
+        py_percent,
+        py_etime,
+        py_hdr,
+        py_finish,
+        NULL
+      );
+    }
+
+    Py_XDECREF(py_hdr);
+    Py_XDECREF(py_percent);
+    Py_XDECREF(py_etime);
+    Py_XDECREF(py_finish);
     Py_XDECREF(result);
   }
 }

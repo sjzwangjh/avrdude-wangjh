@@ -180,6 +180,8 @@ static const struct jtagispentry jtagispcmds[] = {
   {CMD_READ_OSCCAL_PP, 3},
 };
 
+static int stk500v2_set_sck_period(const PROGRAMMER *pgm, double v);
+
 /*
  * From XML file:
   <REVISION>
@@ -2258,7 +2260,7 @@ static void stk500v2_format_itemid(const unsigned char in[DFM_ITEM_ID_LEN], char
 /*
  * Send device identity to the programmer via CMD_SET_PARAMETER + PARAM_DEVICE_IDENTITY
  * SET: CMD_SET_PARAMETER(0x02) + PARAM_DEVICE_IDENTITY(0xB6) + family(1B) + index(2B)
- * GET: CMD_GET_PARAMETER(0x03) + PARAM_DEVICE_IDENTITY(0xB6) → returns family+index+name
+ * GET: CMD_GET_PARAMETER(0x03) + PARAM_DEVICE_IDENTITY(0xB6) -> returns family+index+name
  */
 static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
   unsigned char family;
@@ -2517,6 +2519,9 @@ static int stk500v2_open(PROGRAMMER *pgm, const char *port) {
 
   DEBUG("STK500V2: stk500v2_open()\n");
 
+  // Reset the global backend before selecting any special USB/HID transport.
+  serdev = &serial_serdev;
+
   if(pgm->baudrate)
     pinfo.serialinfo.baud = pgm->baudrate;
 
@@ -2529,6 +2534,25 @@ static int stk500v2_open(PROGRAMMER *pgm, const char *port) {
     my.pgmtype = PGMTYPE_STK500;
 #else
     pmsg_error("avrdoper requires avrdude with libhidapi support\n");
+    return -1;
+#endif
+  }
+
+  if(str_caseeq(port, "avrdoper-usb")) {
+
+#if defined(WIN32)
+    serdev = &avrdoper_winusb_serdev;
+    pinfo.usbinfo.vid = USB_VENDOR_AVRDOPER;
+    pinfo.usbinfo.flags = 0;
+    pinfo.usbinfo.pid = USB_DEVICE_AVRDOPER;
+    my.pgmtype = PGMTYPE_STK500;
+    pgm->set_sck_period = stk500v2_set_sck_period;
+    pgm->fd.usb.max_xfer = USBDEV_MAX_XFER_MKII;
+    pgm->fd.usb.rep = USBDEV_BULK_EP_READ_AVRDOPER;
+    pgm->fd.usb.wep = USBDEV_BULK_EP_WRITE_AVRDOPER;
+    pgm->fd.usb.eep = 0;        // No separate EP for events
+#else
+    pmsg_error("avrdoper-usb currently requires a Windows build with WinUSB support\n");
     return -1;
 #endif
   }
@@ -2606,6 +2630,9 @@ static int stk600_open(PROGRAMMER *pgm, const char *port) {
 
   DEBUG("STK500V2: stk600_open()\n");
 
+  // Reset the global backend before selecting any special USB transport.
+  serdev = &serial_serdev;
+
   if(pgm->baudrate)
     pinfo.serialinfo.baud = pgm->baudrate;
 
@@ -2657,7 +2684,7 @@ static int stk600_open(PROGRAMMER *pgm, const char *port) {
 static void stk500v2_close(PROGRAMMER *pgm) {
   DEBUG("STK500V2: stk500v2_close()\n");
 
-  if(my.workmode_set && pgm->fd.ifd >= 0)
+  if(my.workmode_set && (pgm->fd.ifd >= 0 || pgm->fd.usb.handle != NULL))
     (void) stk500v2_set_prog_state(pgm, 0);
 
   serial_close(&pgm->fd);

@@ -57,7 +57,7 @@ set(EXTRA_WINDOWS_LIBRARIES)
 
 if(WIN32 OR MINGW)
     list(APPEND EXTRA_WINDOWS_RESOURCES "${PROJECT_BINARY_DIR}/src/windows.rc")
-    list(APPEND EXTRA_WINDOWS_LIBRARIES setupapi hid ws2_32)
+    list(APPEND EXTRA_WINDOWS_LIBRARIES setupapi hid winusb ole32 ws2_32)
 endif()
 
 if(MSVC)
@@ -253,6 +253,7 @@ set(SOURCES
     serbb_posix.c
     serbb_win32.c
     ser_avrdoper.c
+    ser_avrdoper_winusb.c
     ser_posix.c
     ser_win32.c
     serialadapter.c

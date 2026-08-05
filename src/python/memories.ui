@@ -186,6 +186,9 @@ color: rgb(180, 180, 180);</string>
        <string>Flash</string>
       </attribute>
       <layout class="QGridLayout" name="gridLayout_5">
+       <property name="columnStretch">
+        <string>4,1</string>
+       </property>
        <item row="1" column="0" rowspan="2">
         <widget class="QGroupBox" name="groupBox_6">
          <property name="title">
@@ -468,9 +471,9 @@ color: rgb(180, 180, 180);</string>
             <property name="lineWidth">
              <number>2</number>
             </property>
-            <property name="text">
-             <string>Buffer</string>
-            </property>
+             <property name="text">
+              <string>Empty</string>
+             </property>
             <property name="alignment">
              <set>Qt::AlignmentFlag::AlignCenter</set>
             </property>
@@ -499,6 +502,9 @@ color: rgb(180, 180, 180);</string>
        <string>EEPROM</string>
       </attribute>
       <layout class="QGridLayout" name="gridLayout_9">
+       <property name="columnStretch">
+        <string>4,1</string>
+       </property>
        <item row="0" column="1" rowspan="3">
         <widget class="QLabel" name="ee_buffer">
          <property name="sizePolicy">
@@ -525,9 +531,9 @@ color: rgb(180, 180, 180);</string>
          <property name="lineWidth">
           <number>2</number>
          </property>
-         <property name="text">
-          <string>Buffer</string>
-         </property>
+          <property name="text">
+           <string>Empty</string>
+          </property>
          <property name="alignment">
           <set>Qt::AlignmentFlag::AlignCenter</set>
          </property>

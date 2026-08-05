@@ -937,6 +937,7 @@ extern struct serial_device serial_serdev;
 extern struct serial_device usb_serdev;
 extern struct serial_device usb_serdev_frame;
 extern struct serial_device avrdoper_serdev;
+extern struct serial_device avrdoper_winusb_serdev;
 extern struct serial_device usbhid_serdev;
 
 #define serial_open (serdev->open)
