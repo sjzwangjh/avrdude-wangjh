@@ -96,7 +96,8 @@ static int usb_path_matches_interface(const char *path, int interface_number) {
   return usb_casestr(path, needle) != NULL;
 }
 
-static const int reportDataSizes[4] = { 13, 29, 61, 125 };
+/* HID EP1 max packet = 32 bytes. Use only reports 1 (15B) and 2 (31B). */
+static const int reportDataSizes[2] = { 13, 29 };
 
 /*
  * AVR-Doper's original HID transport defines up to 125 bytes of payload per
@@ -105,7 +106,7 @@ static const int reportDataSizes[4] = { 13, 29, 61, 125 };
  * feature transfer within a single 64-byte control packet (61 data bytes plus
  * report ID and length) to match the device-side buffering more conservatively.
  */
-#define AVRDOPER_HID_SAFE_DATA_SIZE 61
+#define AVRDOPER_HID_SAFE_DATA_SIZE 29
 #define AVRDOPER_HID_IO_RETRIES 5
 
 static void avrdoper_sleep_ms(unsigned int ms) {
@@ -236,7 +237,6 @@ static int usbGetReport(const union filedescriptor *fdp, int reportType, int rep
     *len = requestLen;
     switch(reportType) {
     case USB_HID_REPORT_TYPE_INPUT:
-      buffer[0] = reportNumber;
       bytesReceived = hid_read_timeout(udev, (unsigned char *) buffer, *len, 500);
       break;
     case USB_HID_REPORT_TYPE_OUTPUT:
@@ -376,7 +376,7 @@ static int avrdoper_send(const union filedescriptor *fdp, const unsigned char *b
     buffer[1] = thisLen;
     memcpy(buffer + 2, buf, thisLen);
     msg_trace("Sending %d bytes data chunk\n", thisLen);
-    rval = usbSetReport(fdp, USB_HID_REPORT_TYPE_FEATURE, (char *) buffer, reportDataSizes[lenIndex] + 2);
+    rval = usbSetReport(fdp, USB_HID_REPORT_TYPE_OUTPUT, (char *) buffer, reportDataSizes[lenIndex] + 2);
     if(rval != 0) {
       pmsg_error("USB %s\n", usbErrorText(rval));
       return -1;
@@ -402,7 +402,7 @@ static int avrdoperFillBuffer(const union filedescriptor *fdp) {
     if(reportDataSizes[lenIndex] + 2 > len)     // Requested data would not fit into buffer
       break;
     len = reportDataSizes[lenIndex] + 2;
-    usbErr = usbGetReport(fdp, USB_HID_REPORT_TYPE_FEATURE, lenIndex + 1, (char *) buffer, &len);
+    usbErr = usbGetReport(fdp, USB_HID_REPORT_TYPE_INPUT, lenIndex + 1, (char *) buffer, &len);
     if(usbErr != 0) {
       pmsg_error("USB %s\n", usbErrorText(usbErr));
       return -1;
