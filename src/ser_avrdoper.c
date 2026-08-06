@@ -96,18 +96,18 @@ static int usb_path_matches_interface(const char *path, int interface_number) {
   return usb_casestr(path, needle) != NULL;
 }
 
-/* HID EP1 max packet = 32 bytes. Use only reports 1 (15B) and 2 (31B). */
-static const int reportDataSizes[2] = { 13, 29 };
+/* HID EP1 max packet = 64 bytes. Use only reports 1 (31B) and 2 (63B). */
+static const int reportDataSizes[2] = { 29, 61 };
 
 /*
  * The STM32 composite implementation uses HID interrupt endpoints (EP1
- * IN/OUT, 32-byte MPS) with two reports:
- *   Report 1 = 15 bytes total (report ID + length + 13 payload bytes)
- *   Report 2 = 31 bytes total (report ID + length + 29 payload bytes)
+ * IN/OUT, 64-byte MPS) with two reports:
+ *   Report 1 = 31 bytes total (report ID + length + 29 payload bytes)
+ *   Report 2 = 63 bytes total (report ID + length + 61 payload bytes)
  * Each report is [report ID][payload length][STK bytes...], matching the
  * device-side HID_EP1_OUT_Callback/HID_TxFlush framing.
  */
-#define AVRDOPER_HID_SAFE_DATA_SIZE 29
+#define AVRDOPER_HID_SAFE_DATA_SIZE 61
 #define AVRDOPER_HID_IO_RETRIES 5
 
 static void avrdoper_sleep_ms(unsigned int ms) {
