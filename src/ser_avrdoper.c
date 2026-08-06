@@ -100,11 +100,12 @@ static int usb_path_matches_interface(const char *path, int interface_number) {
 static const int reportDataSizes[2] = { 13, 29 };
 
 /*
- * AVR-Doper's original HID transport defines up to 125 bytes of payload per
- * feature report. On this STM32 composite implementation, short commands are
- * stable but long programming frames can wedge the HID path. Keep each HID
- * feature transfer within a single 64-byte control packet (61 data bytes plus
- * report ID and length) to match the device-side buffering more conservatively.
+ * The STM32 composite implementation uses HID interrupt endpoints (EP1
+ * IN/OUT, 32-byte MPS) with two reports:
+ *   Report 1 = 15 bytes total (report ID + length + 13 payload bytes)
+ *   Report 2 = 31 bytes total (report ID + length + 29 payload bytes)
+ * Each report is [report ID][payload length][STK bytes...], matching the
+ * device-side HID_EP1_OUT_Callback/HID_TxFlush framing.
  */
 #define AVRDOPER_HID_SAFE_DATA_SIZE 29
 #define AVRDOPER_HID_IO_RETRIES 5
@@ -205,7 +206,11 @@ static int usbSetReport(const union filedescriptor *fdp, int reportType, char *b
       break;
     }
 
-    if(bytesSent == len)
+    /* Windows hidapi pads a short interrupt-OUT report up to the longest
+     * report (output_report_length) and returns that padded length, so a
+     * 15-byte report may come back as 31 bytes written. Accept any write
+     * that reached at least the requested length. */
+    if(bytesSent >= len)
       return USB_ERROR_NONE;
 
     if(bytesSent < 0 && attempt + 1 < AVRDOPER_HID_IO_RETRIES) {
@@ -388,8 +393,10 @@ static int avrdoper_send(const union filedescriptor *fdp, const unsigned char *b
   return 0;
 }
 
-// -------------------------------------------------------------------------
-
+/*
+ * Read HID input reports into the internal RX buffer.
+ * Returns: 0 = data received, 1 = no data (read timeout), -1 = transport error.
+ * ------------------------------------------------------------------------- */
 static int avrdoperFillBuffer(const union filedescriptor *fdp) {
   int bytesPending = reportDataSizes[1];        // Guess how much data is buffered in device
 
@@ -407,6 +414,8 @@ static int avrdoperFillBuffer(const union filedescriptor *fdp) {
       pmsg_error("USB %s\n", usbErrorText(usbErr));
       return -1;
     }
+    if(len < 2)                 // Read timeout: no HID input report arrived
+      return 1;
     msg_trace("Received %d bytes data chunk of total %d\n", len - 2, buffer[1]);
     len -= 2;                   // Compensate for report ID and length byte
     bytesPending = buffer[1] - len;     // Amount still buffered
@@ -430,8 +439,13 @@ static int avrdoper_recv(const union filedescriptor *fdp, unsigned char *buf, si
     int len, available = cx->sad_avrdoperRxLength - cx->sad_avrdoperRxPosition;
 
     if(available <= 0) {        // Buffer is empty
-      if(avrdoperFillBuffer(fdp) < 0)
+      int r = avrdoperFillBuffer(fdp);
+      if(r < 0)
         return -1;
+      if(r == 1) {              // No response within the read timeout
+        pmsg_error("timeout waiting for HID data\n");
+        return -1;
+      }
       continue;
     }
     len = remaining < available? remaining: available;
@@ -449,7 +463,8 @@ static int avrdoper_recv(const union filedescriptor *fdp, unsigned char *buf, si
 
 static int avrdoper_drain(const union filedescriptor *fdp, int display) {
   do {
-    if(avrdoperFillBuffer(fdp) < 0)
+    int r = avrdoperFillBuffer(fdp);
+    if(r < 0)
       return -1;
   } while(cx->sad_avrdoperRxLength > 0);
   return 0;

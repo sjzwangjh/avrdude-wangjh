@@ -531,6 +531,40 @@ class listValidator(QValidator):
         # nothing at all
         return string
 
+class FlashBufferLabelFilter(QObject):
+    """Custom paint for the flash buffer label: bottom-up green fill that is
+    proportional to the buffer fill percentage, empty colour elsewhere, red
+    text on top. E.g. 50% -> lower half dark green, upper half empty colour."""
+
+    def __init__(self, empty_color=QColor(0, 0, 0),
+                 full_color=QColor(0, 100, 0), text_color=QColor(255, 0, 0)):
+        super().__init__()
+        self.percent = 0
+        self.empty_color = QColor(empty_color)
+        self.full_color = QColor(full_color)
+        self.text_color = QColor(text_color)
+
+    def eventFilter(self, source, event):
+        if event.type() == QEvent.Paint:
+            p = QPainter(source)
+            r = source.rect()
+            # empty colour for the whole widget
+            p.fillRect(r, self.empty_color)
+            # full colour rising from the bottom, proportional to percent
+            h = int(round(r.height() * self.percent / 100.0))
+            if h > 0:
+                p.fillRect(QRect(r.left(), r.bottom() - h + 1, r.width(), h),
+                           self.full_color)
+            # keep the framed box look
+            p.setPen(QColor(120, 120, 120))
+            p.drawRect(r.adjusted(0, 0, -1, -1))
+            # red centred text ("Empty" or the percentage)
+            p.setPen(self.text_color)
+            p.drawText(r, Qt.AlignCenter, source.text())
+            p.end()
+            return True
+        return super().eventFilter(source, event)
+
 class adgui(QObject):
     def __init__(self, argv):
         super().__init__()
@@ -558,6 +592,7 @@ class adgui(QObject):
         self.connected = False
 
         self.flash_size = 0
+        self._last_elapsed_sec = 0
 
         ad.set_msg_callback(self.msg_callback)
         ad.set_progress_callback(self.progress_callback)
@@ -652,6 +687,7 @@ class adgui(QObject):
             self.programmer.port.textChanged.connect(self.programmer_port_changed)
             self.adgui.actionDevice_Info.triggered.connect(self.devinfo.show)
             self.adgui.actionProgramming.triggered.connect(self.memories.show)
+            self.memories.finished.connect(self.reset_progress)
             self.memories.readSig.pressed.connect(self.read_signature)
             self.memories.choose.pressed.connect(self.ask_flash_file)
             self.memories.read.pressed.connect(self.flash_read)
@@ -688,16 +724,34 @@ class adgui(QObject):
             for obj in self.memories.groupBox_13.children():
                 obj.installEventFilter(self.fuse_enter_filter)
 
-        self.buffer_empty = 'background-color: rgb(255,240,240);'
-        self.buffer_full = 'background-color: rgb(240,255,240);'
+        self.buffer_empty = 'background-color: rgb(0,0,0); color: rgb(255,0,0);'
+        self.buffer_full = 'background-color: rgb(0,100,0); color: rgb(255,0,0);'
+        self._flash_buffer_filter = FlashBufferLabelFilter()
+        self.memories.buffer.installEventFilter(self._flash_buffer_filter)
         self.update_flash_buffer_view(0)
         self.update_eeprom_buffer_view(0)
 
     def update_flash_buffer_view(self, size):
-        text = "Empty" if size <= 0 else f"Loaded\n{size} bytes"
+        m = ad.avr_locate_mem(self.dev, 'flash') if self.dev else None
+        if size <= 0:
+            text = "Empty"
+            pct = 0
+        else:
+            if m and m.size > 0:
+                pct = max(0, min(100, int(round(100.0 * size / m.size))))
+                text = f"{pct}%"
+            else:
+                pct = 0
+                text = f"Loaded\n{size} bytes"
+        self._flash_buffer_filter.percent = pct
         self.memories.buffer.setText(text)
-        self.memories.buffer.setToolTip("Flash memory buffer status")
+        if m and m.size > 0:
+            self.memories.buffer.setToolTip(
+                f"Flash buffer: {size} / {m.size} bytes ({pct}%)")
+        else:
+            self.memories.buffer.setToolTip(f"Flash buffer: {size} bytes")
         self.memories.buffer.setStyleSheet(self.buffer_empty if size <= 0 else self.buffer_full)
+        self.memories.buffer.update()   # repaint with the new fill level
 
     def update_eeprom_buffer_view(self, size):
         text = "Empty" if size <= 0 else f"Loaded\n{size} bytes"
@@ -807,19 +861,29 @@ class adgui(QObject):
             self.adgui.progressBar.setEnabled(True)
         if percent == 100:
             if finish != -1:
-                # "normal" end: reset and turn off progress bar
-                self.adgui.progressBar.setValue(0)
-                self.adgui.time.setText("-:--")
+                # Normal end: keep the final percentage visible until the
+                # next file load or until the Memories dialog is closed
+                # (reset_progress restores the idle 0% and elapsed time).
+                self.adgui.progressBar.setValue(percent)
                 self.adgui.operation.setText("")
-            #else: freeze progress bar at previous value
-            # but disable it anyway
-            self.adgui.progressBar.setEnabled(False)
+            # else (finish == -1): severe error, freeze at the last value
+            # Keep the bar enabled so the end state remains clearly visible.
+            self.adgui.progressBar.setEnabled(True)
         else:
             self.adgui.progressBar.setValue(percent)
             secs = int(etime % 60)
             mins = int(etime / 60)
             self.adgui.time.setText(f"{mins}:{secs:02d}")
+            self._last_elapsed_sec = etime
         self.app.processEvents()
+
+    def reset_progress(self):
+        """Return the main-window progress bar to the idle 0% state."""
+        self.adgui.progressBar.setValue(0)
+        self.adgui.progressBar.setEnabled(False)
+        self.adgui.time.setText("-:--")
+        self.adgui.operation.setText("")
+        self._last_elapsed_sec = 0
 
     def load_settings(self):
         self.settings = QSettings(QSettings.NativeFormat, QSettings.UserScope, 'avrdude', 'adgui')
@@ -1086,7 +1150,7 @@ class adgui(QObject):
             m = ad.avr_locate_mem(self.dev, 'signature')
             if m:
                 ad.avr_read_mem(self.pgm, self.dev, m)
-                self.progress_callback(100, 0, "", 0) # clear progress bar
+                self.reset_progress() # clear progress bar
                 read_sig = m.get(3)
                 if read_sig == self.dev.signature:
                     self.memories.deviceSig.setStyleSheet(sig_ok)
@@ -1115,6 +1179,7 @@ class adgui(QObject):
             self.detect_flash_file()
 
     def detect_flash_file(self):
+        self.reset_progress()   # a new firmware file was selected: clear old progress
         # If file exists, try finding out real format. If file doesn't
         # exist, try guessing the intended file format based on the
         # suffix.
@@ -1171,7 +1236,7 @@ class adgui(QObject):
             self.log("No data to write into 'flash' memory", ad.MSG_WARNING)
             return
         amnt = ad.avr_write_mem(self.pgm, self.dev, m, self.flash_size)
-        self.log(f"Programmed {amnt} bytes")
+        self.log(f"Programmed {amnt} bytes used {int(round(self._last_elapsed_sec))} second")
 
     def clear_flash_buffer(self):
         m = ad.avr_locate_mem(self.dev, 'flash')
@@ -1213,6 +1278,7 @@ class adgui(QObject):
         self.log(f"Wrote {amnt} bytes to {self.flashname}")
 
     def flash_load(self):
+        self.reset_progress()   # loading a new file into the buffer clears old progress
         if self.memories.ffAuto.isChecked():
             fmt = ad.FMT_AUTO
         elif self.memories.ffELF.isChecked():
@@ -1325,7 +1391,7 @@ class adgui(QObject):
             self.log("No data to write into 'eeprom' memory", ad.MSG_WARNING)
             return
         amnt = ad.avr_write_mem(self.pgm, self.dev, m, self.eeprom_size)
-        self.log(f"Programmed {amnt} bytes")
+        self.log(f"Programmed {amnt} bytes used {int(round(self._last_elapsed_sec))} second")
 
     def clear_eeprom_buffer(self):
         m = ad.avr_locate_mem(self.dev, 'eeprom')
