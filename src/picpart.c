@@ -81,3 +81,7 @@ uint16_t pic_devcode(const char* part_id) {
     return 0xFFFF;
 }
 
+int pic_is_pic_part(const char* part_id) {
+    return pic_devcode(part_id) != 0xFFFF;
+}
+

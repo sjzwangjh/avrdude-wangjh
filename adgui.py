@@ -980,6 +980,7 @@ class adgui(QObject):
         self.stop_programmer()
 
     def read_signature(self):
+        self.log(">> avr_read_mem(pgm, dev, signature)   # 读签名")
         sig_ok = "background-color: rgb(255, 255, 255);\ncolor: rgb(0, 100, 0);"
         sig_bad = "background-color: rgb(255, 255, 255);\ncolor: rgb(150, 0, 0);"
         if self.connected:
@@ -1048,6 +1049,7 @@ class adgui(QObject):
                 self.memories.ffRbin.setChecked(True)
 
     def flash_read(self):
+        self.log(">> avr_read_mem(pgm, dev, flash)   # 全片读回")
         self.adgui.progressBar.setEnabled(True)
         m = ad.avr_locate_mem(self.dev, 'flash')
         if not m:
@@ -1059,6 +1061,45 @@ class adgui(QObject):
         if amnt > 0:
             self.memories.buffer.setStyleSheet(self.buffer_full)
 
+    def _write_mem_verify(self, m, size, memname, do_erase=False):
+        """写 → 读回校验，最多重试 3 次；仍失败则停止并报错，杜绝无限重试死循环。"""
+        max_attempts = 3                # 只操作 3 次，超过即停止并报错
+        if do_erase:
+            # 与 CLI 的 auto_erase 语义对齐：写 Flash 前先整片擦除。
+            # NOR Flash 不擦除直接写只能 1→0、不能 0→1，目标片里有旧固件时校验永远不过。
+            self.log("Erasing device before flash write ...")
+            if self.pgm.chip_erase(self.dev) != 0:
+                self.log("Chip erase failed, aborting flash write", ad.MSG_ERROR)
+                return False
+
+        expected = m.get(size)          # 备份期望数据（avr_read_mem 会覆盖 m 的缓冲区）
+        for attempt in range(1, max_attempts + 1):     # 最多 3 次：写 → 读回校验
+            self.log(f"{memname} write+verify attempt {attempt}/{max_attempts} ...")
+            self.log(f">> avr_write_mem(pgm, dev, {memname.lower()}, {size})")
+            try:
+                amnt = ad.avr_write_mem(self.pgm, self.dev, m, size)
+                if amnt < 0:
+                    self.log(f"{memname} write failed (attempt {attempt}/{max_attempts})", ad.MSG_ERROR)
+                    m.put(expected)     # 恢复缓冲区，保持界面数据一致
+                    return False
+                # 只读回“编程区”（缓冲区已分配标签覆盖的页），避免整片 Flash 全量读回浪费时间。
+                self.log(f">> avr_read_mem(pgm, dev, {memname.lower()})   # 只读编程区")
+                rd = ad.avr_read_mem(self.pgm, self.dev, m, self.dev)
+                actual = m.get(size)
+            except Exception as e:      # 任何异常都按一次失败处理，不进入死循环
+                self.log(f"{memname} write/read error: {e} (attempt {attempt}/{max_attempts})", ad.MSG_ERROR)
+                rd = -1
+                actual = None
+            m.put(expected)             # 恢复缓冲区（重试时写回正确数据）
+            if rd >= 0 and actual == expected:
+                self.log(f"{memname} programmed and verified OK (attempt {attempt}/{max_attempts}, {amnt} bytes)")
+                return True
+            self.log(f"{memname} verify mismatch (attempt {attempt}/{max_attempts}), retrying ...", ad.MSG_WARNING)
+
+        self.log(f"{memname} programming failed after {max_attempts} attempts", ad.MSG_ERROR)
+        self.log("Check target connection / erase / power supply, then retry", ad.MSG_WARNING)
+        return False
+
     def flash_write(self):
         self.adgui.progressBar.setEnabled(True)
         m = ad.avr_locate_mem(self.dev, 'flash')
@@ -1068,8 +1109,7 @@ class adgui(QObject):
         if self.flash_size == 0:
             self.log("No data to write into 'flash' memory", ad.MSG_WARNING)
             return
-        amnt = ad.avr_write_mem(self.pgm, self.dev, m, self.flash_size)
-        self.log(f"Programmed {amnt} bytes")
+        self._write_mem_verify(m, self.flash_size, "Flash", do_erase=True)
 
     def clear_buffer(self):
         m = ad.avr_locate_mem(self.dev, 'flash')
@@ -1136,6 +1176,7 @@ class adgui(QObject):
                                       f"Do you want to erase the entire device?")
         if result != QMessageBox.StandardButton.Yes:
             return
+        self.log(">> pgm.chip_erase(dev)")
         result = self.pgm.chip_erase(self.dev)
         if result == 0:
             self.log("Device erased")
@@ -1204,6 +1245,7 @@ class adgui(QObject):
                 self.memories.ee_ffRbin.setChecked(True)
 
     def eeprom_read(self):
+        self.log(">> avr_read_mem(pgm, dev, eeprom)")
         self.adgui.progressBar.setEnabled(True)
         m = ad.avr_locate_mem(self.dev, 'eeprom')
         if not m:
@@ -1224,8 +1266,8 @@ class adgui(QObject):
         if self.eeprom_size == 0:
             self.log("No data to write into 'eeprom' memory", ad.MSG_WARNING)
             return
-        amnt = ad.avr_write_mem(self.pgm, self.dev, m, self.eeprom_size)
-        self.log(f"Programmed {amnt} bytes")
+        # EEPROM 走 ISP 字节写（自动擦除），不需要也不应触发整片擦除。
+        self._write_mem_verify(m, self.eeprom_size, "EEPROM", do_erase=False)
 
     def clear_buffer(self):
         m = ad.avr_locate_mem(self.dev, 'eeprom')
@@ -1432,6 +1474,7 @@ class adgui(QObject):
             if not self.fuselabels[fuse][1]:
                 self.log(f"Not programming {fuse} memory: not changed", ad.MSG_DEBUG)
                 continue
+            self.log(f">> avr_write_mem(pgm, dev, {fuse}, 1)   # {val}")
             amnt = ad.avr_write_mem(self.pgm, self.dev, m, 1)
             if amnt > 0:
                 self.log(f"Wrote {amnt} bytes of {fuse}")

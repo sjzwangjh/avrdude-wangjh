@@ -129,7 +129,7 @@ static const struct jtagispentry jtagispcmds[] = {
   {CMD_SET_WORK_STATE, 2},
   {CMD_SET_PROG_STATE, 2},
   {CMD_GET_OFFLINE_INFO, 8},
-  {CMD_GET_OFFLINE_PACKAGE, 95},
+  {CMD_GET_OFFLINE_PACKAGE, (unsigned short) (2 + 1 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN)},
   {CMD_SET_OFFLINE_ACTIVE, 2},
   {CMD_OSCCAL, 2},
   {CMD_LOAD_ADDRESS, 2},
@@ -286,6 +286,8 @@ static int stk500v2_set_prog_state(const PROGRAMMER *pgm, unsigned char state);
 static int stk500v2_offline_run_action(const PROGRAMMER *pgm);
 static int stk500v2_parse_itemid_bcd(const char *text, unsigned char out[DFM_ITEM_ID_LEN]);
 static void stk500v2_format_itemid(const unsigned char in[DFM_ITEM_ID_LEN], char *out, size_t outsz);
+static bool stk500v2_is_pic_part(const AVRPART *p);
+static int stk500v2_avr_part_index(const AVRPART *p, unsigned short *index);
 
 static int stk600_set_sck_period(const PROGRAMMER *pgm, double v);
 static double stk500v2_fosc_value(const PROGRAMMER *pgm);
@@ -967,6 +969,17 @@ static int stk500v2_chip_erase(const PROGRAMMER *pgm, const AVRPART *p) {
   int result;
   unsigned char buf[16];
 
+  if(stk500v2_is_pic_part(p)) {
+    unsigned char pb[2];
+    pb[0] = CMD_CHIP_ERASE_ICSP;
+    pb[1] = 0;                        // flags
+    result = stk500v2_command(pgm, pb, 2, sizeof(pb));
+    if(result < 0)
+      return -1;
+    usleep(p->chip_erase_delay);      // 0 unless set; firmware waits internally
+    return 0;
+  }
+
   if(p->op[AVR_OP_CHIP_ERASE] == NULL) {
     pmsg_error("chip erase instruction not defined for part %s\n", p->desc);
     return -1;
@@ -1054,6 +1067,18 @@ static int stk500v2_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
 
   my.lastpart = p;
 
+  if(stk500v2_is_pic_part(p)) {
+    // PIC: the firmware runs ICSP itself; AVR SPI opcodes do not apply
+    if(str_casestarts(pgm->port, "avrdoper") && !my.device_id_set) {
+      if(stk500v2_set_device_id(pgm, p) < 0)
+        return -1;
+    }
+    unsigned char pb[2];
+    pb[0] = CMD_ENTER_PROGMODE_ICSP;
+    pb[1] = 0;                        // enter mode: 0 = HV entry (universal)
+    return stk500v2_command(pgm, pb, 2, sizeof(pb));
+  }
+
   if(p->op[AVR_OP_PGM_ENABLE] == NULL) {
     pmsg_error("program enable instruction not defined for part %s\n", p->desc);
     return -1;
@@ -1063,8 +1088,8 @@ static int stk500v2_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
     // Activate AVR-style (low active) RESET
     stk500v2_setparm_real(pgm, PARAM_RESET_POLARITY, 0x01);
 
-  // DFM: Only avrdoper sends device identity to the programmer before entering progmode
-  if(str_caseeq(pgm->port, "avrdoper")) {
+  // DFM: Only avrdoper sends device identity, and only once per avrdude session
+  if(str_casestarts(pgm->port, "avrdoper") && !my.device_id_set) {
     stk500v2_set_device_id(pgm, p);
   }
 
@@ -1697,6 +1722,15 @@ static void stk500v2_disable(const PROGRAMMER *pgm) {
   unsigned char buf[16];
   int result;
 
+  if(my.lastpart && stk500v2_is_pic_part(my.lastpart)) {
+    unsigned char pb[2];
+    pb[0] = CMD_LEAVE_PROGMODE_ICSP;
+    pb[1] = 0;
+    if(stk500v2_command(pgm, pb, 2, sizeof(pb)) < 0)
+      pmsg_error("unable to leave PIC programming mode\n");
+    return;
+  }
+
   buf[0] = CMD_LEAVE_PROGMODE_ISP;
   buf[1] = 1;                   // preDelay;
   buf[2] = 1;                   // postDelay;
@@ -1989,18 +2023,18 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       continue;
     }
 
-    if(str_starts(extended_param, "itemdisc=")) {
-      const char *itemdisc = extended_param + strlen("itemdisc=");
-      size_t len = strlen(itemdisc);
+    if(str_starts(extended_param, "itemdesc=")) {
+      const char *itemdesc = extended_param + strlen("itemdesc=");
+      size_t len = strlen(itemdesc);
 
       if(len > DFM_ITEM_DESC_LEN) {
-        pmsg_error("invalid value in -x %s; itemdisc length must be <= %u bytes\n",
+        pmsg_error("invalid value in -x %s; itemdesc length must be <= %u bytes\n",
           extended_param, DFM_ITEM_DESC_LEN);
         rv = -1;
         break;
       }
       memset(my.device_item_desc, 0, sizeof(my.device_item_desc));
-      memcpy(my.device_item_desc, itemdisc, len);
+      memcpy(my.device_item_desc, itemdesc, len);
       continue;
     }
 
@@ -2041,8 +2075,8 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
     msg_error("  -x offline=info   Show DFM offline package count and active index\n");
     msg_error("  -x offline=list   List DFM offline package summaries\n");
     msg_error("  -x offline=active:<n> Set DFM active offline package index\n");
-    msg_error("  -x itemid=YYMMDDhhmmss Set project ID as 6-byte BCD time stamp\n");
-    msg_error("  -x itemdisc=<text> Set project name/description string, max 64 bytes\n");
+    msg_error("  -x itemid=YYMMDDhhmmss Set project ID as 12-byte BCD-style time stamp\n");
+    msg_error("  -x itemdesc=<text> Set project name/description string, max 64 bytes\n");
     msg_error("  -x help           Show this help menu and exit\n");
     return rv;
   }
@@ -2231,16 +2265,15 @@ static int scratchmonkey_vfy_led(const PROGRAMMER *pgm, int value) {
 static int stk500v2_parse_itemid_bcd(const char *text, unsigned char out[DFM_ITEM_ID_LEN]) {
   size_t i;
 
-  if(text == NULL || out == NULL || strlen(text) != DFM_ITEM_ID_LEN*2)
+  if(text == NULL || out == NULL || strlen(text) != DFM_ITEM_ID_LEN)
     return -1;
 
   for(i = 0; i < DFM_ITEM_ID_LEN; i++) {
-    unsigned char hi = (unsigned char) text[i*2];
-    unsigned char lo = (unsigned char) text[i*2 + 1];
+    unsigned char digit = (unsigned char) text[i];
 
-    if(hi < '0' || hi > '9' || lo < '0' || lo > '9')
+    if(digit < '0' || digit > '9')
       return -1;
-    out[i] = (unsigned char) (((hi - '0') << 4) | (lo - '0'));
+    out[i] = (unsigned char) (digit - '0');
   }
 
   return 0;
@@ -2249,12 +2282,37 @@ static int stk500v2_parse_itemid_bcd(const char *text, unsigned char out[DFM_ITE
 static void stk500v2_format_itemid(const unsigned char in[DFM_ITEM_ID_LEN], char *out, size_t outsz) {
   size_t i;
 
-  if(in == NULL || out == NULL || outsz < DFM_ITEM_ID_LEN*2 + 1)
+  if(in == NULL || out == NULL || outsz < DFM_ITEM_ID_LEN + 1)
     return;
 
   for(i = 0; i < DFM_ITEM_ID_LEN; i++)
-    sprintf(out + i*2, "%01u%01u", (in[i] >> 4) & 0x0f, in[i] & 0x0f);
-  out[DFM_ITEM_ID_LEN*2] = 0;
+    out[i] = (char) ((in[i] <= 9)? ('0' + in[i]): '?');
+  out[DFM_ITEM_ID_LEN] = 0;
+}
+
+static bool stk500v2_is_pic_part(const AVRPART *p) {
+  return p != NULL && pic_devcode(p->id) != 0xFFFF;
+}
+
+static int stk500v2_avr_part_index(const AVRPART *p, unsigned short *index) {
+  unsigned short current = 0;
+
+  if(p == NULL || index == NULL)
+    return -1;
+
+  for(LNODEID ln = lfirst(part_list); ln; ln = lnext(ln)) {
+    AVRPART *candidate = ldata(ln);
+
+    if(stk500v2_is_pic_part(candidate))
+      continue;
+    if(candidate == p) {
+      *index = current;
+      return 0;
+    }
+    ++current;
+  }
+
+  return -1;
 }
 
 /*
@@ -2267,12 +2325,11 @@ static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
   unsigned short index;
   unsigned char sbuf[2 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN];
   unsigned char gbuf[2 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN + 8];
-  char itemid_text[DFM_ITEM_ID_LEN*2 + 1];
-  char itemdisc_text[DFM_ITEM_DESC_LEN + 1];
+  char itemid_text[DFM_ITEM_ID_LEN + 1];
+  char itemdesc_text[DFM_ITEM_DESC_LEN + 1];
   size_t pos;
 
-  family = 0;
-  if(str_casestarts(p->id, "p") || str_casestarts(p->id, "P")) {
+  if(stk500v2_is_pic_part(p)) {
     family = 1;
     index = pic_devcode(p->id);
     if(index == 0xFFFF) {
@@ -2281,10 +2338,10 @@ static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
     }
   } else {
     family = 0;
-    if(p->avr910_devcode)
-      index = (unsigned short) p->avr910_devcode;
-    else
-      index = (unsigned short) p->stk500_devcode;
+    if(stk500v2_avr_part_index(p, &index) < 0) {
+      pmsg_warning("AVR device %s not found in avrdude part_list order, using index=0\n", p->id);
+      index = 0;
+    }
   }
 
   memset(sbuf, 0, sizeof(sbuf));
@@ -2323,27 +2380,27 @@ static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
   stk500v2_format_itemid(my.device_item_id, itemid_text, sizeof(itemid_text));
 
   if(memcmp(gbuf + 5, my.device_item_id, DFM_ITEM_ID_LEN) != 0) {
-    char rb_itemid[DFM_ITEM_ID_LEN*2 + 1];
+    char rb_itemid[DFM_ITEM_ID_LEN + 1];
     stk500v2_format_itemid(gbuf + 5, rb_itemid, sizeof(rb_itemid));
     pmsg_warning("device identity itemid mismatch: sent=%s got=%s\n", itemid_text, rb_itemid);
     return -1;
   }
 
-  memset(itemdisc_text, 0, sizeof(itemdisc_text));
-  memcpy(itemdisc_text, gbuf + 5 + DFM_ITEM_ID_LEN, DFM_ITEM_DESC_LEN);
-  itemdisc_text[DFM_ITEM_DESC_LEN] = 0;
+  memset(itemdesc_text, 0, sizeof(itemdesc_text));
+  memcpy(itemdesc_text, gbuf + 5 + DFM_ITEM_ID_LEN, DFM_ITEM_DESC_LEN);
+  itemdesc_text[DFM_ITEM_DESC_LEN] = 0;
 
   if(memcmp(gbuf + 5 + DFM_ITEM_ID_LEN, my.device_item_desc, DFM_ITEM_DESC_LEN) != 0) {
     char sent_desc[DFM_ITEM_DESC_LEN + 1];
     memset(sent_desc, 0, sizeof(sent_desc));
     memcpy(sent_desc, my.device_item_desc, DFM_ITEM_DESC_LEN);
-    pmsg_warning("device identity itemdisc mismatch: sent=\"%s\" got=\"%s\"\n",
-      sent_desc[0]? sent_desc: "", itemdisc_text[0]? itemdisc_text: "");
+    pmsg_warning("device identity itemdesc mismatch: sent=\"%s\" got=\"%s\"\n",
+      sent_desc[0]? sent_desc: "", itemdesc_text[0]? itemdesc_text: "");
     return -1;
   }
 
-  pmsg_notice("programmer verified device identity: family=%d index=0x%04x itemid=%s itemdisc=\"%s\"\n",
-    family, index, itemid_text, itemdisc_text[0]? itemdisc_text: "");
+  pmsg_notice("programmer verified device identity: family=%d index=0x%04x itemid=%s itemdesc=\"%s\"\n",
+    family, index, itemid_text, itemdesc_text[0]? itemdesc_text: "");
 
   my.device_id_set = true;
   my.device_family = family;
@@ -2439,7 +2496,7 @@ static int stk500v2_offline_get_info(const PROGRAMMER *pgm,
 
 static int stk500v2_offline_print_summary(const PROGRAMMER *pgm, unsigned int index) {
   unsigned char buf[160];
-  char itemid[DFM_ITEM_ID_LEN*2 + 1];
+  char itemid[DFM_ITEM_ID_LEN + 1];
   char itemdesc[DFM_ITEM_DESC_LEN + 1];
   unsigned int used, state, pkg_index, arch, dev_index;
   unsigned long flash_addr, total_size, packet_count, crc32;
@@ -2449,7 +2506,7 @@ static int stk500v2_offline_print_summary(const PROGRAMMER *pgm, unsigned int in
   buf[0] = CMD_GET_OFFLINE_PACKAGE;
   dfm_put_u16(&buf[1], index);
   result = stk500v2_command(pgm, buf, 3, sizeof(buf));
-  if(result < 95)
+  if(result < (int) (2 + 1 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN))
     return -1;
 
   used = buf[2];
@@ -2469,7 +2526,7 @@ static int stk500v2_offline_print_summary(const PROGRAMMER *pgm, unsigned int in
   memset(itemdesc, 0, sizeof(itemdesc));
   memcpy(itemdesc, &buf[25 + DFM_ITEM_ID_LEN], DFM_ITEM_DESC_LEN);
 
-  pmsg_notice("offline package %u: arch=%u device=0x%04x packets=%lu size=%lu flash=0x%08lx crc=0x%08lx itemid=%s itemdisc=\"%s\"\n",
+  pmsg_notice("offline package %u: arch=%u device=0x%04x packets=%lu size=%lu flash=0x%08lx crc=0x%08lx itemid=%s itemdesc=\"%s\"\n",
     pkg_index, arch, dev_index, packet_count, total_size, flash_addr, crc32,
     itemid, itemdesc[0]? itemdesc: "");
   return 0;
@@ -3156,6 +3213,117 @@ static int stk500isp_write_byte(const PROGRAMMER *pgm, const AVRPART *p, const A
   return 0;
 }
 
+// DFM: write flash words / EEPROM bytes of a PIC part via the custom ICSP commands.
+// The target address comes from the protocol LOAD_ADDRESS register (stkAddress in
+// the firmware); flash addresses are word addresses, hence the >>1 shift.
+static int stk500v2_pic_paged_write(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m,
+  unsigned int page_size, unsigned int addr, unsigned int n_bytes) {
+  unsigned int block_size, maxaddr = addr + n_bytes;
+  unsigned char buf[266];
+  unsigned char cmd;
+  int result;
+
+  if(mem_is_flash(m))
+    cmd = CMD_PROGRAM_FLASH_ICSP;
+  else if(mem_is_eeprom(m))
+    cmd = CMD_PROGRAM_EEPROM_ICSP;
+  else {
+    pmsg_error("unsupported memory %s for PIC part %s\n", m->desc, p->desc);
+    return -1;
+  }
+
+  if(page_size == 0)
+    page_size = 256;
+
+  for(; addr < maxaddr; addr += page_size) {
+    block_size = (maxaddr - addr) < page_size? maxaddr - addr: page_size;
+
+    buf[0] = cmd;
+    if(mem_is_flash(m)) {
+      unsigned int nw = block_size / 2;
+      if(block_size & 1) {
+        pmsg_error("odd flash byte count for PIC part %s\n", p->desc);
+        return -1;
+      }
+      buf[1] = nw & 0xff;
+      buf[2] = (nw >> 8) & 0xff;
+      if(stk500v2_loadaddr(pgm, addr >> 1) < 0)
+        return -1;
+    } else {
+      buf[1] = block_size & 0xff;
+      buf[2] = (block_size >> 8) & 0xff;
+      if(stk500v2_loadaddr(pgm, addr) < 0)
+        return -1;
+    }
+    buf[3] = 0;                        // flags
+    buf[4] = 0;                        // delay
+    memcpy(buf + 5, m->buf + addr, block_size);
+
+    result = stk500v2_command(pgm, buf, 5 + block_size, sizeof(buf));
+    if(result < 0) {
+      pmsg_error("ICSP write failed for memory %s of part %s at 0x%x\n", m->desc, p->desc, addr);
+      return -1;
+    }
+  }
+
+  return n_bytes;
+}
+
+// DFM: read flash words / EEPROM bytes of a PIC part via the custom ICSP commands.
+static int stk500v2_pic_paged_load(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m,
+  unsigned int page_size, unsigned int addr, unsigned int n_bytes) {
+  unsigned int block_size, maxaddr = addr + n_bytes;
+  unsigned char buf[266];
+  unsigned char cmd;
+  int result;
+
+  if(mem_is_flash(m))
+    cmd = CMD_READ_FLASH_ICSP;
+  else if(mem_is_eeprom(m))
+    cmd = CMD_READ_EEPROM_ICSP;
+  else {
+    pmsg_error("unsupported memory %s for PIC part %s\n", m->desc, p->desc);
+    return -1;
+  }
+
+  page_size = m->readsize;             // mirror the AVR paged_load behaviour
+  if(page_size == 0)
+    page_size = 256;
+
+  for(; addr < maxaddr; addr += page_size) {
+    block_size = (maxaddr - addr) < page_size? maxaddr - addr: page_size;
+
+    buf[0] = cmd;
+    if(mem_is_flash(m)) {
+      unsigned int nw = block_size / 2;
+      if(block_size & 1) {
+        pmsg_error("odd flash byte count for PIC part %s\n", p->desc);
+        return -1;
+      }
+      buf[1] = nw & 0xff;
+      buf[2] = (nw >> 8) & 0xff;
+      if(stk500v2_loadaddr(pgm, addr >> 1) < 0)
+        return -1;
+    } else {
+      buf[1] = block_size & 0xff;
+      buf[2] = (block_size >> 8) & 0xff;
+      if(stk500v2_loadaddr(pgm, addr) < 0)
+        return -1;
+    }
+    buf[3] = 0;                        // flags
+
+    result = stk500v2_command(pgm, buf, 4, sizeof(buf));
+    if(result < 0) {
+      pmsg_error("ICSP read failed for memory %s of part %s at 0x%x\n", m->desc, p->desc, addr);
+      return -1;
+    }
+    // Reply layout: buf[0]=cmd, buf[1]=status (validated by stk500v2_command), buf[2..]=data
+    memcpy(m->buf + addr, buf + 2, block_size);
+  }
+
+  return n_bytes;
+}
+
 static int stk500v2_paged_write(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m,
   unsigned int page_size, unsigned int addr, unsigned int n_bytes) {
   unsigned int block_size, last_addr, addrshift, use_ext_addr;
@@ -3167,6 +3335,9 @@ static int stk500v2_paged_write(const PROGRAMMER *pgm, const AVRPART *p, const A
   OPCODE *rop, *wop;
 
   DEBUG("STK500V2: stk500v2_paged_write(..,%s,%u,%u,%u)\n", m->desc, page_size, addr, n_bytes);
+
+  if(stk500v2_is_pic_part(p))
+    return stk500v2_pic_paged_write(pgm, p, m, page_size, addr, n_bytes);
 
   if(page_size == 0)
     page_size = 256;
@@ -3396,6 +3567,9 @@ static int stk500v2_paged_load(const PROGRAMMER *pgm, const AVRPART *p, const AV
   OPCODE *rop;
 
   DEBUG("STK500V2: stk500v2_paged_load(..,%s,%u,%u,%u)\n", m->desc, page_size, addr, n_bytes);
+
+  if(stk500v2_is_pic_part(p))
+    return stk500v2_pic_paged_load(pgm, p, m, page_size, addr, n_bytes);
 
   page_size = m->readsize;
 

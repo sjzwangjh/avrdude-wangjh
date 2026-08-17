@@ -26,6 +26,9 @@ uint16_t pic_get_device_count(void);
  */
 uint16_t pic_devcode(const char* part_id);
 
+/* Check whether a part id is a known PIC device (pic_devcode != 0xFFFF) */
+int pic_is_pic_part(const char* part_id);
+
 #endif /* PICPART_H */
 
 

@@ -159,7 +159,17 @@ add_custom_command(
     VERBATIM
     )
 
-add_custom_target(conf ALL DEPENDS avrdude.conf)
+# Copy the PIC device configuration (picdude.conf) next to avrdude.conf
+add_custom_command(
+    OUTPUT picdude.conf
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/picdude.conf"
+        "${CMAKE_CURRENT_BINARY_DIR}/picdude.conf"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/picdude.conf"
+    VERBATIM
+    )
+
+add_custom_target(conf ALL DEPENDS avrdude.conf picdude.conf)
 
 # =====================================
 # Project
@@ -417,6 +427,7 @@ install(TARGETS libavrdude
     PUBLIC_HEADER DESTINATION include COMPONENT dev
     )
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/avrdude.conf" TYPE SYSCONF)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/picdude.conf" TYPE SYSCONF)
 install(FILES "avrdude.1"
 	DESTINATION "${CMAKE_INSTALL_MANDIR}/man1"
 	)

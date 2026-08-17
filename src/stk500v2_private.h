@@ -51,6 +51,16 @@
 #define CMD_SET_SCK                         0x1D        // JTAGICE3
 #define CMD_GET_SCK                         0x1E        // JTAGICE3
 
+// *****************[ DFM: PIC ICSP command constants ]************************
+
+#define CMD_ENTER_PROGMODE_ICSP             0x40
+#define CMD_LEAVE_PROGMODE_ICSP             0x41
+#define CMD_CHIP_ERASE_ICSP                 0x42
+#define CMD_PROGRAM_FLASH_ICSP              0x43
+#define CMD_READ_FLASH_ICSP                 0x44
+#define CMD_PROGRAM_EEPROM_ICSP             0x45
+#define CMD_READ_EEPROM_ICSP                0x46
+
 // *****************[ STK PP command constants ]*******************************
 
 #define CMD_ENTER_PROGMODE_PP               0x20
@@ -186,9 +196,9 @@
 #define PARAM_DATA                          0x9D        // STK500 only
 #define PARAM_RESET_POLARITY                0x9E        // STK500 only, and STK600 FW version <= 2.0.3
 #define PARAM_CONTROLLER_INIT               0x9F
-#define PARAM_DEVICE_IDENTITY               0xB6        // DFM: family(1B)+index(2B)+item_id(6B)+item_desc(64B)
+#define PARAM_DEVICE_IDENTITY               0xB6        // DFM: family(1B)+index(2B)+item_id(12B)+item_desc(64B)
 
-#define DFM_ITEM_ID_LEN                     6
+#define DFM_ITEM_ID_LEN                     12
 #define DFM_ITEM_DESC_LEN                   64
 
 // STK600 parameters

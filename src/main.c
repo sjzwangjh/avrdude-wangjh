@@ -53,6 +53,7 @@
 #include "libavrdude.h"
 #include "config.h"
 #include "developer_opts.h"
+#include "picpart.h"
 
 char *progname = "avrdude";
 
@@ -1677,7 +1678,7 @@ init_again:
    * the other end that is responding correctly.  A check against
    * 0xffffff/0x000000 should ensure that the signature bytes are valid.
    */
-  if(!is_awire(p)) {            // Not AVR32
+  if(!is_awire(p) && !pic_is_pic_part(p->id)) {   // Not AVR32; PIC identity is handled via DEVICE_IDENTITY
     int attempt = 0;
     int waittime = 10000;       // 10 ms
 
