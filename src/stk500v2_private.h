@@ -60,6 +60,13 @@
 #define CMD_READ_FLASH_ICSP                 0x44
 #define CMD_PROGRAM_EEPROM_ICSP             0x45
 #define CMD_READ_EEPROM_ICSP                0x46
+#define CMD_PROGRAM_CONFIG_ICSP             0x47
+#define CMD_READ_CONFIG_ICSP                0x48
+#define CMD_PROGRAM_USER_ID_ICSP            0x49
+#define CMD_READ_USER_ID_ICSP               0x4A
+#define CMD_READ_SIGNATURE_ICSP             0x4B
+#define CMD_READ_OSCCAL_ICSP                0x4C
+#define CMD_WRITE_OSCCAL_ICSP               0x4D
 
 // *****************[ STK PP command constants ]*******************************
 
@@ -296,6 +303,7 @@ struct pdata {
   unsigned short device_index;
   unsigned char device_item_id[DFM_ITEM_ID_LEN];
   char device_item_desc[DFM_ITEM_DESC_LEN + 1];
+  bool icsp_deviceid_checked;
 
   // Get/set flags for target power switch
   bool vtarg_switch_get;

@@ -105,6 +105,7 @@ const PROGRAMMER_TYPE programmers_types[] = {   // Name(s) the programmers call 
   {"stk500generic", stk500generic_initpgm, stk500generic_desc}, // "STK500GENERIC"
   {"stk500v2", stk500v2_initpgm, stk500v2_desc},        // "STK500V2"
   {"stk500hvsp", stk500hvsp_initpgm, stk500hvsp_desc},  // "STK500HVSP"
+  {"stk500icsp", stk500icsp_initpgm, stk500icsp_desc},  // "STK500ICSP"
   {"stk500pp", stk500pp_initpgm, stk500pp_desc},        // "STK500PP"
   {"stk600", stk600_initpgm, stk600_desc},      // "STK600"
   {"stk600hvsp", stk600hvsp_initpgm, stk600hvsp_desc},  // "STK600HVSP"

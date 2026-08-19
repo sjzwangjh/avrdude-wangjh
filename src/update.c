@@ -32,10 +32,20 @@
 
 #include "avrdude.h"
 #include "libavrdude.h"
+#include "picpart.h"
 
 // Is s a multi-memory string (comma-separates list, all, ALL, etc or list subtraction)?
 static int is_multimem(const char *s) {
   return str_eq(s, "ALL") || str_eq(s, "all") || str_eq(s, "etc") || strpbrk(s, "-,\\");
+}
+
+static int is_multimem_format(FILEFMT fmt) {
+  return fmt == FMT_IHEX || fmt == FMT_IHXC || fmt == FMT_SREC || fmt == FMT_ELF;
+}
+
+static int should_expand_pic_flash_update(const AVRPART *p, const UPDATE *upd) {
+  return p && upd && upd->memstr && str_eq(upd->memstr, "flash") &&
+    pic_is_pic_part(p->id) && is_multimem_format(upd->format);
 }
 
 /*
@@ -661,7 +671,11 @@ int do_op(const PROGRAMMER *pgm, const AVRPART *p, const UPDATE *upd, enum updat
 
   int allsize, len, maxrlen = 0, ns = 0;
 
-  if(is_multimem(umstr)) {
+  if(is_multimem(umstr) || should_expand_pic_flash_update(p, upd)) {
+    if(should_expand_pic_flash_update(p, upd)) {
+      pmsg_notice("PIC HEX write/verify detected on flash; auto-expanding to flash,eeprom,userid,config with config handled last\n");
+      umstr = "flash,eeprom,userid,config";
+    }
     umemlist = memory_list(umstr, pgm, p, &ns, &rwvsoftfail, NULL);
 
     if(!ns) {                   // ns is number of memories listed

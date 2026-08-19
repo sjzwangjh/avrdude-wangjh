@@ -46,6 +46,7 @@
 
 #include "avrdude.h"
 #include "libavrdude.h"
+#include "picpart.h"
 
 // Common internal record structure for ihex and srec files
 struct ihexsrec {
@@ -208,6 +209,10 @@ static int baseoffset(const AVRPART *p, const AVRMEM *base, const char *memname)
   return base? base->offset: 0;
 }
 
+static int fileio_pic_is_extra_mem(const AVRPART *p, const AVRMEM *mem, const char *name) {
+  return p && mem && mem->desc && str_eq(mem->desc, name) && pic_is_pic_part(p->id);
+}
+
 // Extends where memory is put in flat address space of .elf files
 unsigned fileio_mem_offset(const AVRPART *p, const AVRMEM *mem) {
   if(mem->type == 0 && mem->size == (int) ANY_MEM_SIZE)
@@ -215,6 +220,8 @@ unsigned fileio_mem_offset(const AVRPART *p, const AVRMEM *mem) {
 
   unsigned location =
     mem_is_in_flash(mem)? MBASE(FLASH) + mem->offset - boffset(p, flash):
+    fileio_pic_is_extra_mem(p, mem, "userid")? mem->offset:
+    fileio_pic_is_extra_mem(p, mem, "config")? mem->offset:
     mem_is_io(mem) || mem_is_sram(mem)? MBASE(DATA) + mem->offset:
     mem_is_eeprom(mem)? MBASE(EEPROM):
     mem_is_in_fuses(mem)? MBASE(FUSES) + mem_fuse_offset(mem): mem_is_lock(mem)? MBASE(LOCK):

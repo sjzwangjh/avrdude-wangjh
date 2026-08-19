@@ -426,6 +426,7 @@ int avr_read_mem(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *mem, con
     int need_read, failure;
     unsigned int pageaddr;
     unsigned int npages, nread;
+    unsigned int run_addr = 0, run_pages = 0; // DFM: batched paged_load() run
 
     // Quickly scan number of pages to be written to first
     for(pageaddr = 0, npages = 0; pageaddr < (unsigned int) mem->size; pageaddr += mem->page_size) {
@@ -439,6 +440,15 @@ int avr_read_mem(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *mem, con
       }
     }
 
+    // DFM: when the programmer supports run-sized paged_load() calls, batch
+    // contiguous pages into one call. Runs are flushed at gaps (skipped pages,
+    // i.e. hex file segment boundaries), when the run reaches the maximum
+    // packet size, or at the end. Every read packet remains anchored by its
+    // own load-address command on the programmer side.
+    unsigned int read_run_max = PAGED_RUN_MAX_BYTES;
+    if(mem->readsize > 0 && mem->readsize < read_run_max)
+      read_run_max = mem->readsize;
+
     for(pageaddr = 0, failure = 0, nread = 0;
       !failure && pageaddr < (unsigned int) mem->size; pageaddr += mem->page_size) {
 
@@ -451,15 +461,48 @@ int avr_read_mem(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *mem, con
         }
       }
       if(need_read) {
-        rc = pgm->paged_load(pgm, p, mem, mem->page_size, pageaddr, mem->page_size);
-        if(rc < 0)
-          // Paged load failed, fall back to byte-at-a-time read below
-          failure = 1;
         nread++;
         report_progress(nread, npages, NULL);
+        rc = 0;
+
+        if(pgm->extra_features & HAS_PAGED_READ_RUN) {
+          if(run_pages == 0) {
+            run_addr = pageaddr;
+            run_pages = 1;
+          } else if(pageaddr == run_addr + run_pages*mem->page_size) {
+            run_pages++;
+          } else {
+            rc = pgm->paged_load(pgm, p, mem, mem->page_size, run_addr, run_pages*mem->page_size);
+            run_addr = pageaddr;
+            run_pages = 1;
+          }
+          if(rc >= 0 && run_pages*mem->page_size >= read_run_max) {
+            rc = pgm->paged_load(pgm, p, mem, mem->page_size, run_addr, run_pages*mem->page_size);
+            run_pages = 0;
+          }
+          if(rc < 0)
+            // Paged load failed, fall back to byte-at-a-time read below
+            failure = 1;
+        } else {
+          rc = pgm->paged_load(pgm, p, mem, mem->page_size, pageaddr, mem->page_size);
+          if(rc < 0)
+            // Paged load failed, fall back to byte-at-a-time read below
+            failure = 1;
+        }
       } else {
         pmsg_debug("%s(): skipping page %u: no interesting data\n", __func__, pageaddr/mem->page_size);
+        if((pgm->extra_features & HAS_PAGED_READ_RUN) && run_pages > 0) {
+          rc = pgm->paged_load(pgm, p, mem, mem->page_size, run_addr, run_pages*mem->page_size);
+          if(rc < 0)
+            failure = 1;
+          run_pages = 0;
+        }
       }
+    }
+    if(!failure && (pgm->extra_features & HAS_PAGED_READ_RUN) && run_pages > 0) {
+      rc = pgm->paged_load(pgm, p, mem, mem->page_size, run_addr, run_pages*mem->page_size);
+      if(rc < 0)
+        failure = 1;
     }
     if(!failure) {
       led_clr(pgm, LED_PGM);
@@ -1162,6 +1205,17 @@ int avr_write_mem(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m, int 
         }
     }
 
+    // DFM: programmers that opt in via HAS_PAGED_WRITE_RUN (PIC ICSP) get
+    // run-sized paged_write() calls: contiguous pages are coalesced into one
+    // packet (up to PAGED_RUN_MAX_BYTES) with a single load-address command.
+    // Runs below the minimum packet size are deferred until a flush is
+    // required (gap, maximum packet size, or end of memory). AVR programmers
+    // keep the original page-at-a-time behaviour; run batching is only used
+    // when no per-page page_erase is needed.
+    int use_write_batch = (pgm->extra_features & HAS_PAGED_WRITE_RUN) != 0 &&
+      !(auto_erase && pgm->page_erase && !mem_is_eeprom(cm));
+    unsigned int run_addr = 0, run_pages = 0; // DFM: batched paged_write() run
+
     for(pageaddr = 0, failure = 0, nwritten = 0;
       !failure && pageaddr < (unsigned int) cwsize; pageaddr += cm->page_size) {
 
@@ -1175,17 +1229,45 @@ int avr_write_mem(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m, int 
       if(need_write) {
         int rc = 0;
 
-        if(auto_erase && pgm->page_erase && !mem_is_eeprom(cm))
-          rc = pgm->page_erase(pgm, p, cm, pageaddr);
-        if(rc >= 0)
-          rc = pgm->paged_write(pgm, p, cm, cm->page_size, pageaddr, cm->page_size);
-        if(rc < 0)
-          failure = 1;          // Paged write failed, fall back to byte-at-a-time write below
+        if(use_write_batch) {
+          if(run_pages == 0) {
+            run_addr = pageaddr;
+            run_pages = 1;
+          } else if(pageaddr == run_addr + run_pages*cm->page_size) {
+            run_pages++;
+          } else {
+            rc = pgm->paged_write(pgm, p, cm, cm->page_size, run_addr, run_pages*cm->page_size);
+            run_addr = pageaddr;
+            run_pages = 1;
+          }
+          if(rc >= 0 && run_pages*cm->page_size >= PAGED_RUN_MAX_BYTES) {
+            rc = pgm->paged_write(pgm, p, cm, cm->page_size, run_addr, run_pages*cm->page_size);
+            run_pages = 0;
+          }
+          if(rc < 0)
+            failure = 1;      // Paged write failed, fall back to byte-at-a-time write below
+        } else {
+          if(auto_erase && pgm->page_erase && !mem_is_eeprom(cm))
+            rc = pgm->page_erase(pgm, p, cm, pageaddr);
+          if(rc >= 0)
+            rc = pgm->paged_write(pgm, p, cm, cm->page_size, pageaddr, cm->page_size);
+          if(rc < 0)
+            failure = 1;      // Paged write failed, fall back to byte-at-a-time write below
+        }
         nwritten++;
         report_progress(nwritten, npages, NULL);
       } else {
         pmsg_debug("%s(): skipping page %u: no interesting data\n", __func__, pageaddr/cm->page_size);
+        if(use_write_batch && run_pages > 0) {
+          if(pgm->paged_write(pgm, p, cm, cm->page_size, run_addr, run_pages*cm->page_size) < 0)
+            failure = 1;
+          run_pages = 0;
+        }
       }
+    }
+    if(!failure && use_write_batch && run_pages > 0) {
+      if(pgm->paged_write(pgm, p, cm, cm->page_size, run_addr, run_pages*cm->page_size) < 0)
+        failure = 1;
     }
 
     avr_free_mem(cm);

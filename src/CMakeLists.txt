@@ -193,6 +193,8 @@ set(SOURCES
     libavrdude-avrintel.h
     avr_opcodes.c
     avrpart.c
+    avrpart_icsp.c
+    avrpart_icsp.h
     bitbang.c
     bitbang.h
     buspirate.c
@@ -387,6 +389,11 @@ endif()
 if(HAVE_SWIG)
   include (UseSWIG)
   swig_add_library(swig_avrdude LANGUAGE Python SOURCES libavrdude.i ${SOURCES})
+  if(WIN32 AND MSVC)
+    # Python headers on Windows can auto-link pythonXY_d.lib in Debug builds.
+    # We link the discovered Python import library explicitly instead.
+    target_compile_definitions(swig_avrdude PRIVATE Py_NO_LINK_LIB)
+  endif()
   target_include_directories(swig_avrdude
     PUBLIC
     "${Python3_INCLUDE_DIRS}"

@@ -72,12 +72,13 @@
 #include "jtag3_private.h"
 
 #include "picpart.h"             // DFM: PIC device lookup via pic10-12-16-init.xml
+#include "avrpart_icsp.h"        // DFM: AVR device lookup via avrdude-avr-init.xml
 
 #define STK500V2_XTAL 7372800U
 #define SCRATCHMONKEY_XTAL 16000000U
 
 // Timeout (in seconds) for waiting for serial response
-#define SERIAL_TIMEOUT 2
+#define SERIAL_TIMEOUT 10
 
 // Retry count
 #define RETRIES 5
@@ -87,7 +88,7 @@
 #define DEBUGRECV(...) msg_trace2(__VA_ARGS__)
 
 enum hvmode {
-  PPMODE, HVSPMODE
+  PPMODE, HVSPMODE, ICSPMODE
 };
 
 #define my (*(struct pdata *) (pgm->cookie))
@@ -148,6 +149,21 @@ static const struct jtagispentry jtagispcmds[] = {
   {CMD_READ_SIGNATURE_ISP, 4},
   {CMD_READ_OSCCAL_ISP, 4},
   {CMD_SPI_MULTI, SZ_SPI_MULTI},
+  // ICSP mode
+  {CMD_ENTER_PROGMODE_ICSP, 2},
+  {CMD_LEAVE_PROGMODE_ICSP, 2},
+  {CMD_CHIP_ERASE_ICSP, 2},
+  {CMD_PROGRAM_FLASH_ICSP, 2},
+  {CMD_READ_FLASH_ICSP, SZ_READ_FLASH_EE},
+  {CMD_PROGRAM_EEPROM_ICSP, 2},
+  {CMD_READ_EEPROM_ICSP, SZ_READ_FLASH_EE},
+  {CMD_PROGRAM_CONFIG_ICSP, 2},
+  {CMD_READ_CONFIG_ICSP, 5},
+  {CMD_PROGRAM_USER_ID_ICSP, 2},
+  {CMD_READ_USER_ID_ICSP, SZ_READ_FLASH_EE},
+  {CMD_READ_SIGNATURE_ICSP, 4},
+  {CMD_READ_OSCCAL_ICSP, 4},
+  {CMD_WRITE_OSCCAL_ICSP, 2},
   // All HV modes
   {CMD_SET_CONTROL_STACK, 2},
   // HVSP mode
@@ -181,6 +197,10 @@ static const struct jtagispentry jtagispcmds[] = {
 };
 
 static int stk500v2_set_sck_period(const PROGRAMMER *pgm, double v);
+static unsigned int dfm_get_u16(const unsigned char *p);
+static int stk500v2_pic_verify_deviceid_once(const PROGRAMMER *pgm, const AVRPART *p);
+static bool stk500v2_pic_is_config_mem(const AVRPART *p, const AVRMEM *m);
+static bool stk500v2_pic_is_userid_mem(const AVRPART *p, const AVRMEM *m);
 
 /*
  * From XML file:
@@ -1008,14 +1028,18 @@ static int stk500hv_chip_erase(const PROGRAMMER *pgm, const AVRPART *p, enum hvm
     buf[0] = CMD_CHIP_ERASE_PP;
     buf[1] = p->chiperasepulsewidth;
     buf[2] = p->chiperasepolltimeout;
-  } else {
+  } else if(mode == HVSPMODE) {
     buf[0] = CMD_CHIP_ERASE_HVSP;
     buf[1] = p->chiperasepolltimeout;
     buf[2] = p->chiperasetime;
+  } else {                      // ICSPMODE
+    buf[0] = CMD_CHIP_ERASE_ICSP;
+    buf[1] = 0;                 // DFM ICSP protocol has no extra parameter here
   }
-  result = stk500v2_command(pgm, buf, 3, sizeof(buf));
+  result = stk500v2_command(pgm, buf, mode == ICSPMODE? 2: 3, sizeof(buf));
   usleep(p->chip_erase_delay);
-  pgm->initialize(pgm, p);
+  if(mode != ICSPMODE)          // mirror the stk500v2 PIC branch: no re-enable needed
+    pgm->initialize(pgm, p);
 
   return result >= 0? 0: -1;
 }
@@ -1028,6 +1052,13 @@ static int stk500pp_chip_erase(const PROGRAMMER *pgm, const AVRPART *p) {
 // Issue the 'chip erase' command to the AVR device, HVSP mode
 static int stk500hvsp_chip_erase(const PROGRAMMER *pgm, const AVRPART *p) {
   return stk500hv_chip_erase(pgm, p, HVSPMODE);
+}
+
+// Issue the 'chip erase' command to the PIC device, ICSP mode
+static int stk500icsp_chip_erase(const PROGRAMMER *pgm, const AVRPART *p) {
+  if(stk500v2_pic_verify_deviceid_once(pgm, p) < 0)
+    return -1;
+  return stk500hv_chip_erase(pgm, p, ICSPMODE);
 }
 
 /*
@@ -1090,7 +1121,8 @@ static int stk500v2_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
 
   // DFM: Only avrdoper sends device identity, and only once per avrdude session
   if(str_casestarts(pgm->port, "avrdoper") && !my.device_id_set) {
-    stk500v2_set_device_id(pgm, p);
+    if(stk500v2_set_device_id(pgm, p) < 0)
+      return -1;
   }
 
   tries = 0;
@@ -1208,6 +1240,28 @@ static int stk500hvsp_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
   buf[8] = p->resetdelayus;
 
   return stk500v2_command(pgm, buf, 9, sizeof(buf));
+}
+
+// Issue the 'program enable' command to the PIC device, ICSP mode
+static int stk500icsp_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
+  unsigned char pb[2];
+
+  my.lastpart = p;
+  my.icsp_deviceid_checked = false;
+
+  if(!stk500v2_is_pic_part(p)) {
+    pmsg_error("stk500icsp can only be used with PIC devices\n");
+    return -1;
+  }
+
+  // DFM: the firmware needs the device identity before any 0x40-family command
+  if(!my.device_id_set && stk500v2_set_device_id(pgm, p) < 0)
+    return -1;
+
+  pb[0] = CMD_ENTER_PROGMODE_ICSP;
+  pb[1] = 0;                    // enter mode: 0 = HV entry (universal)
+
+  return stk500v2_command(pgm, pb, 2, sizeof(pb));
 }
 
 // Initialize the AVR device and prepare it to accept commands
@@ -1754,12 +1808,20 @@ static void stk500hv_disable(const PROGRAMMER *pgm, enum hvmode mode) {
   mmt_free(my.eeprom_pagecache);
   my.eeprom_pagecache = NULL;
 
-  buf[0] = mode == PPMODE? CMD_LEAVE_PROGMODE_PP:
-    (my.pgmtype == PGMTYPE_STK600? CMD_LEAVE_PROGMODE_HVSP_STK600: CMD_LEAVE_PROGMODE_HVSP);
-  buf[1] = 15;                  // p->hvleavestabdelay;
-  buf[2] = 15;                  // p->resetdelay;
+  if(mode == PPMODE) {
+    buf[0] = CMD_LEAVE_PROGMODE_PP;
+    buf[1] = 15;                // p->hvleavestabdelay;
+    buf[2] = 15;                // p->resetdelay;
+  } else if(mode == HVSPMODE) {
+    buf[0] = (my.pgmtype == PGMTYPE_STK600? CMD_LEAVE_PROGMODE_HVSP_STK600: CMD_LEAVE_PROGMODE_HVSP);
+    buf[1] = 15;                // p->hvleavestabdelay;
+    buf[2] = 15;                // p->resetdelay;
+  } else {                      // ICSPMODE
+    buf[0] = CMD_LEAVE_PROGMODE_ICSP;
+    buf[1] = 0;                 // DFM ICSP protocol takes no pre/post delay
+  }
 
-  result = stk500v2_command(pgm, buf, 3, sizeof(buf));
+  result = stk500v2_command(pgm, buf, mode == ICSPMODE? 2: 3, sizeof(buf));
 
   if(result < 0) {
     pmsg_error("unable to leave programming mode\n");
@@ -1776,6 +1838,12 @@ static void stk500pp_disable(const PROGRAMMER *pgm) {
 // Leave programming mode, HVSP mode
 static void stk500hvsp_disable(const PROGRAMMER *pgm) {
   stk500hv_disable(pgm, HVSPMODE);
+}
+
+// Leave programming mode, ICSP mode
+static void stk500icsp_disable(const PROGRAMMER *pgm) {
+  my.icsp_deviceid_checked = false;
+  stk500hv_disable(pgm, ICSPMODE);
 }
 
 static void stk500v2_enable(PROGRAMMER *pgm, const AVRPART *p) {
@@ -2294,32 +2362,29 @@ static bool stk500v2_is_pic_part(const AVRPART *p) {
   return p != NULL && pic_devcode(p->id) != 0xFFFF;
 }
 
+static bool stk500v2_pic_is_config_mem(const AVRPART *p, const AVRMEM *m) {
+  return stk500v2_is_pic_part(p) && m != NULL && m->desc != NULL && str_eq(m->desc, "config");
+}
+
+static bool stk500v2_pic_is_userid_mem(const AVRPART *p, const AVRMEM *m) {
+  return stk500v2_is_pic_part(p) && m != NULL && m->desc != NULL && str_eq(m->desc, "userid");
+}
+
 static int stk500v2_avr_part_index(const AVRPART *p, unsigned short *index) {
-  unsigned short current = 0;
+  uint16_t idx;
 
   if(p == NULL || index == NULL)
     return -1;
 
-  for(LNODEID ln = lfirst(part_list); ln; ln = lnext(ln)) {
-    AVRPART *candidate = ldata(ln);
-
-    if(stk500v2_is_pic_part(candidate))
-      continue;
-    if(candidate == p) {
-      *index = current;
-      return 0;
-    }
-    ++current;
-  }
-
-  return -1;
+  // DFM: the index must match the STM32 firmware g_avrDeviceTable order,
+  // which is generated from avrdude-avr-init.xml, not from avrdude.conf order.
+  idx = avr_devcode(p->id);
+  if(idx == 0xFFFF)
+    return -1;
+  *index = (unsigned short) idx;
+  return 0;
 }
 
-/*
- * Send device identity to the programmer via CMD_SET_PARAMETER + PARAM_DEVICE_IDENTITY
- * SET: CMD_SET_PARAMETER(0x02) + PARAM_DEVICE_IDENTITY(0xB6) + family(1B) + index(2B)
- * GET: CMD_GET_PARAMETER(0x03) + PARAM_DEVICE_IDENTITY(0xB6) -> returns family+index+name
- */
 static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
   unsigned char family;
   unsigned short index;
@@ -2333,14 +2398,14 @@ static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
     family = 1;
     index = pic_devcode(p->id);
     if(index == 0xFFFF) {
-      pmsg_warning("PIC device %s not found in pic10-12-16-init.xml, using index=0\n", p->id);
+      pmsg_warning("PIC device %s not found in generated PIC device table, using index=0\n", p->id);
       index = 0;
     }
   } else {
     family = 0;
     if(stk500v2_avr_part_index(p, &index) < 0) {
-      pmsg_warning("AVR device %s not found in avrdude part_list order, using index=0\n", p->id);
-      index = 0;
+      pmsg_error("AVR device %s is not in the avrdude-avr-init.xml device table; cannot set device identity\n", p->id);
+      return -1;
     }
   }
 
@@ -2405,6 +2470,42 @@ static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
   my.device_id_set = true;
   my.device_family = family;
   my.device_index = index;
+  return 0;
+}
+
+static int stk500v2_pic_verify_deviceid_once(const PROGRAMMER *pgm, const AVRPART *p) {
+  unsigned char buf[8];
+  unsigned int read_value;
+
+  if(!stk500v2_is_pic_part(p))
+    return 0;
+
+  if(my.icsp_deviceid_checked)
+    return 0;
+
+  if(p->deviceid_addr == 0 || p->deviceid_expected == 0) {
+    pmsg_notice("ICSP deviceID check skipped: no valid expected deviceID\n");
+    my.icsp_deviceid_checked = true;
+    return 0;
+  }
+
+  memset(buf, 0, sizeof(buf));
+  buf[0] = CMD_READ_SIGNATURE_ICSP;
+  if(stk500v2_command(pgm, buf, 1, sizeof(buf)) < 0) {
+    pmsg_error("ICSP deviceID read failed\n");
+    return -1;
+  }
+
+  read_value = dfm_get_u16(&buf[2]);
+  if((read_value & p->deviceid_mask) != (p->deviceid_expected & p->deviceid_mask)) {
+    pmsg_error("ICSP deviceID mismatch: read=0x%04x expect=0x%04x mask=0x%04x\n",
+      read_value, p->deviceid_expected, p->deviceid_mask);
+    return -1;
+  }
+
+  pmsg_notice("ICSP deviceID verified: read=0x%04x mask=0x%04x\n",
+    read_value, p->deviceid_mask);
+  my.icsp_deviceid_checked = true;
   return 0;
 }
 
@@ -3221,12 +3322,17 @@ static int stk500v2_pic_paged_write(const PROGRAMMER *pgm, const AVRPART *p, con
   unsigned int block_size, maxaddr = addr + n_bytes;
   unsigned char buf[266];
   unsigned char cmd;
+  unsigned long load_addr;
   int result;
 
   if(mem_is_flash(m))
     cmd = CMD_PROGRAM_FLASH_ICSP;
   else if(mem_is_eeprom(m))
     cmd = CMD_PROGRAM_EEPROM_ICSP;
+  else if(stk500v2_pic_is_userid_mem(p, m))
+    cmd = CMD_PROGRAM_USER_ID_ICSP;
+  else if(stk500v2_pic_is_config_mem(p, m))
+    cmd = CMD_PROGRAM_CONFIG_ICSP;
   else {
     pmsg_error("unsupported memory %s for PIC part %s\n", m->desc, p->desc);
     return -1;
@@ -3235,19 +3341,37 @@ static int stk500v2_pic_paged_write(const PROGRAMMER *pgm, const AVRPART *p, con
   if(page_size == 0)
     page_size = 256;
 
-  for(; addr < maxaddr; addr += page_size) {
-    block_size = (maxaddr - addr) < page_size? maxaddr - addr: page_size;
+  if(stk500v2_pic_verify_deviceid_once(pgm, p) < 0)
+    return -1;
+
+  if(stk500v2_pic_is_userid_mem(p, m))
+    pmsg_notice("ICSP programming USER_ID memory via CMD_PROGRAM_USER_ID_ICSP (0x49)\n");
+  else if(stk500v2_pic_is_config_mem(p, m))
+    pmsg_notice("ICSP programming CONFIG memory via CMD_PROGRAM_CONFIG_ICSP (0x47)\n");
+
+  for(; addr < maxaddr; addr += block_size) {
+    // DFM: one load-address + write packet per block. Blocks are capped at
+    // PAGED_RUN_MAX_BYTES (128 flash words) so contiguous pages from the host
+    // are transmitted in a single maximum-size packet; each packet is anchored
+    // by its own load-address command.
+    block_size = maxaddr - addr;
+    if(block_size > PAGED_RUN_MAX_BYTES)
+      block_size = PAGED_RUN_MAX_BYTES;
+    if(mem_is_flash(m) || stk500v2_pic_is_userid_mem(p, m) || stk500v2_pic_is_config_mem(p, m)) {
+      if(block_size & 1)
+        block_size--;
+      if(block_size == 0)
+        block_size = 2;
+    }
 
     buf[0] = cmd;
-    if(mem_is_flash(m)) {
+    if(mem_is_flash(m) || stk500v2_pic_is_userid_mem(p, m) || stk500v2_pic_is_config_mem(p, m)) {
       unsigned int nw = block_size / 2;
-      if(block_size & 1) {
-        pmsg_error("odd flash byte count for PIC part %s\n", p->desc);
-        return -1;
-      }
       buf[1] = nw & 0xff;
       buf[2] = (nw >> 8) & 0xff;
-      if(stk500v2_loadaddr(pgm, addr >> 1) < 0)
+      load_addr = (mem_is_flash(m)? 0: (unsigned long) m->offset) + addr;
+      load_addr >>= 1;
+      if(stk500v2_loadaddr(pgm, load_addr) < 0)
         return -1;
     } else {
       buf[1] = block_size & 0xff;
@@ -3275,12 +3399,17 @@ static int stk500v2_pic_paged_load(const PROGRAMMER *pgm, const AVRPART *p, cons
   unsigned int block_size, maxaddr = addr + n_bytes;
   unsigned char buf[266];
   unsigned char cmd;
+  unsigned long load_addr;
   int result;
 
   if(mem_is_flash(m))
     cmd = CMD_READ_FLASH_ICSP;
   else if(mem_is_eeprom(m))
     cmd = CMD_READ_EEPROM_ICSP;
+  else if(stk500v2_pic_is_userid_mem(p, m))
+    cmd = CMD_READ_USER_ID_ICSP;
+  else if(stk500v2_pic_is_config_mem(p, m))
+    cmd = CMD_READ_CONFIG_ICSP;
   else {
     pmsg_error("unsupported memory %s for PIC part %s\n", m->desc, p->desc);
     return -1;
@@ -3290,19 +3419,30 @@ static int stk500v2_pic_paged_load(const PROGRAMMER *pgm, const AVRPART *p, cons
   if(page_size == 0)
     page_size = 256;
 
-  for(; addr < maxaddr; addr += page_size) {
-    block_size = (maxaddr - addr) < page_size? maxaddr - addr: page_size;
+  for(; addr < maxaddr; addr += block_size) {
+    // DFM: blocks are capped at PAGED_RUN_MAX_BYTES (128 flash words) so
+    // contiguous pages are read in a single maximum-size packet. The read
+    // packet never skips its load-address command: every block is anchored
+    // at its own address (the hex file is a sequence of address+data records,
+    // so read-back verification must follow the same anchors).
+    block_size = maxaddr - addr;
+    if(block_size > PAGED_RUN_MAX_BYTES)
+      block_size = PAGED_RUN_MAX_BYTES;
+    if(mem_is_flash(m) || stk500v2_pic_is_userid_mem(p, m) || stk500v2_pic_is_config_mem(p, m)) {
+      if(block_size & 1)
+        block_size--;
+      if(block_size == 0)
+        block_size = 2;
+    }
 
     buf[0] = cmd;
-    if(mem_is_flash(m)) {
+    if(mem_is_flash(m) || stk500v2_pic_is_userid_mem(p, m) || stk500v2_pic_is_config_mem(p, m)) {
       unsigned int nw = block_size / 2;
-      if(block_size & 1) {
-        pmsg_error("odd flash byte count for PIC part %s\n", p->desc);
-        return -1;
-      }
       buf[1] = nw & 0xff;
       buf[2] = (nw >> 8) & 0xff;
-      if(stk500v2_loadaddr(pgm, addr >> 1) < 0)
+      load_addr = (mem_is_flash(m)? 0: (unsigned long) m->offset) + addr;
+      load_addr >>= 1;
+      if(stk500v2_loadaddr(pgm, load_addr) < 0)
         return -1;
     } else {
       buf[1] = block_size & 0xff;
@@ -3556,6 +3696,12 @@ static int stk500hvsp_paged_write(const PROGRAMMER *pgm, const AVRPART *p, const
   return stk500hv_paged_write(pgm, p, m, page_size, addr, n_bytes, HVSPMODE);
 }
 
+// Write pages of flash/EEPROM, ICSP mode (DFM: PIC part)
+static int stk500icsp_paged_write(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m,
+  unsigned int page_size, unsigned int addr, unsigned int n_bytes) {
+  return stk500v2_pic_paged_write(pgm, p, m, page_size, addr, n_bytes);
+}
+
 static int stk500v2_paged_load(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m,
   unsigned int page_size, unsigned int addr, unsigned int n_bytes) {
   unsigned int block_size, hiaddr, addrshift, use_ext_addr;
@@ -3725,6 +3871,12 @@ static int stk500pp_paged_load(const PROGRAMMER *pgm, const AVRPART *p, const AV
 static int stk500hvsp_paged_load(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m,
   unsigned int page_size, unsigned int addr, unsigned int n_bytes) {
   return stk500hv_paged_load(pgm, p, m, page_size, addr, n_bytes, HVSPMODE);
+}
+
+// Read pages of flash/EEPROM, ICSP mode (DFM: PIC part)
+static int stk500icsp_paged_load(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *m,
+  unsigned int page_size, unsigned int addr, unsigned int n_bytes) {
+  return stk500v2_pic_paged_load(pgm, p, m, page_size, addr, n_bytes);
 }
 
 static int stk500v2_set_vtarget(const PROGRAMMER *pgm, double v) {
@@ -5391,6 +5543,9 @@ const char stk500v2_desc[] = "Atmel STK500 Version 2.x firmware";
 
 void stk500v2_initpgm(PROGRAMMER *pgm) {
   pgm->ptyp = "STK500V2";
+  // DFM: allow avr.c to batch contiguous pages into run-sized paged_load()
+  // calls; every read packet is still anchored by a load-address command.
+  pgm->extra_features |= HAS_PAGED_READ_RUN;
 
   // Mandatory functions
   pgm->initialize = stk500v2_initialize;
@@ -5503,6 +5658,37 @@ void stk500hvsp_initpgm(PROGRAMMER *pgm) {
     pgm->set_varef = stk500v2_set_varef;
   if(pgm->extra_features & HAS_FOSC_ADJ)
     pgm->set_fosc = stk500v2_set_fosc;
+}
+
+const char stk500icsp_desc[] = "STM32 avrdoper in PIC ICSP programming mode";
+
+void stk500icsp_initpgm(PROGRAMMER *pgm) {
+  pgm->ptyp = "STK500ICSP";
+  // DFM: allow avr.c to batch contiguous pages into run-sized paged_write()
+  // and paged_load() calls for the PIC ICSP protocol.
+  pgm->extra_features |= HAS_PAGED_WRITE_RUN | HAS_PAGED_READ_RUN;
+
+  // Mandatory functions
+  pgm->initialize = stk500v2_initialize;
+  pgm->display = stk500v2_display;
+  pgm->enable = stk500v2_enable;
+  pgm->disable = stk500icsp_disable;
+  pgm->program_enable = stk500icsp_program_enable;
+  pgm->chip_erase = stk500icsp_chip_erase;
+  pgm->open = stk500v2_open;
+  pgm->close = stk500v2_close;
+  pgm->read_byte = stk500isp_read_byte;
+  pgm->write_byte = stk500isp_write_byte;
+
+  // Optional functions
+  pgm->paged_write = stk500icsp_paged_write;
+  pgm->paged_load = stk500icsp_paged_load;
+  pgm->print_parms = stk500v2_print_parms;
+  pgm->set_sck_period = stk500v2_set_sck_period;
+  pgm->parseextparams = stk500v2_parseextparms;
+  pgm->setup = stk500v2_setup;
+  pgm->teardown = stk500v2_teardown;
+  pgm->page_size = 256;
 }
 
 const char stk500v2_jtagmkII_desc[] = "Atmel JTAG ICE mkII in ISP mode";

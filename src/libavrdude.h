@@ -308,6 +308,14 @@ typedef struct opcode {
 #define HAS_VAREF_ADJ        32
 #define HAS_BITCLOCK_ADJ     64
 
+// DFM: paged write/load run batching (PIC ICSP and STK500v2 ISP reads)
+#define HAS_PAGED_WRITE_RUN 128
+#define HAS_PAGED_READ_RUN  256
+
+// Max bytes per batched paged write/load run; limited by the STK500v2
+// message body size (275 bytes) and avrdude's 266/275 byte buffers
+#define PAGED_RUN_MAX_BYTES 256
+
 #define AVR_FAMILYIDLEN       7
 #define AVR_SIBLEN           32
 #define AVR_CHIP_REVLEN       1
@@ -334,6 +342,9 @@ typedef struct avrpart {
   const char *family_id;        // Family id in the SIB (avr8x)
   int prog_modes;               // Programming interfaces, see #define PM_...
   int mcuid;                    // Unique id in 0..2039 for urclock programmer
+  unsigned int deviceid_addr;   // PIC ICSP device-id read address (0 = unavailable)
+  unsigned int deviceid_mask;   // PIC ICSP device-id compare mask
+  unsigned int deviceid_expected; // PIC ICSP expected device-id value
   int archnum;                  // Avr-gcc architecture number for the part
   int n_interrupts;             // Number of interrupts, used for vector bootloaders
   int n_page_erase;             // If set, number of pages erased during NVM erase

@@ -242,7 +242,7 @@ static int usbGetReport(const union filedescriptor *fdp, int reportType, int rep
     *len = requestLen;
     switch(reportType) {
     case USB_HID_REPORT_TYPE_INPUT:
-      bytesReceived = hid_read_timeout(udev, (unsigned char *) buffer, *len, 500);
+      bytesReceived = hid_read_timeout(udev, (unsigned char *) buffer, *len, 5000);
       break;
     case USB_HID_REPORT_TYPE_OUTPUT:
       break;

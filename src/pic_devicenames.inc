@@ -1,5 +1,5 @@
-/* Auto-generated from pic10-12-16-init.xml - 274 devices */
-#define PIC_DEVICE_COUNT 274
+/* Auto-generated from pic10-12-16-init.xml - 285 devices */
+#define PIC_DEVICE_COUNT 285
 
 static const char *const pic_device_names[PIC_DEVICE_COUNT] = {
     "PIC12F629",
@@ -27,6 +27,11 @@ static const char *const pic_device_names[PIC_DEVICE_COUNT] = {
     "PIC10LF322",
     "PIC12F752",
     "PIC12HV752",
+    "PIC12F529T39A",
+    "PIC12F529T48A",
+    "PICRF675F",
+    "PICRF675H",
+    "PICRF675K",
     "PIC12C508",
     "PIC12C508A",
     "PIC12C509",
@@ -120,6 +125,8 @@ static const char *const pic_device_names[PIC_DEVICE_COUNT] = {
     "PIC16CR83",
     "PIC16CR84",
     "PIC16CR926",
+    "PICRF509AF",
+    "PICRF509AG",
     "PIC16F1933",
     "PIC16F1934",
     "PIC16F1936",
@@ -226,6 +233,8 @@ static const char *const pic_device_names[PIC_DEVICE_COUNT] = {
     "PIC12LF1552",
     "PIC12LF1571",
     "PIC12LF1572",
+    "PIC12LF1840T39A",
+    "PIC12LF1840T48A",
     "PIC16F1512",
     "PIC16F1513",
     "PIC16F1516",
@@ -247,6 +256,7 @@ static const char *const pic_device_names[PIC_DEVICE_COUNT] = {
     "PIC16F1777",
     "PIC16F1778",
     "PIC16F1779",
+    "PIC16F1829LIN",
     "PIC16F1946",
     "PIC16F1947",
     "PIC16LF1512",
@@ -274,7 +284,7 @@ static const char *const pic_device_names[PIC_DEVICE_COUNT] = {
     "PIC16LF1777",
     "PIC16LF1778",
     "PIC16LF1779",
+    "PIC16LF1824T39A",
     "PIC16LF1946",
     "PIC16LF1947",
 };
-
