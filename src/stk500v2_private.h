@@ -152,6 +152,7 @@
 
 // Errors
 #define STATUS_CMD_FAILED                   0xC0
+#define STATUS_CAL_LOST                     0xE1   /* firmware: device calibration lost, cannot erase/reprogram */
 #define STATUS_CKSUM_ERROR                  0xC1
 #define STATUS_CMD_UNKNOWN                  0xC9
 #define STATUS_CMD_ILLEGAL_PARAMETER        0xCA

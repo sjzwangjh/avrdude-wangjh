@@ -920,6 +920,9 @@ retry:
         return status;
       } else if(buf[1] == STATUS_CMD_FAILED) {
         pmsg_error("command failed\n");
+      } else if(buf[1] == STATUS_CAL_LOST) {
+        pmsg_error("device calibration lost (code-protected or missing factory content); "
+          "cannot be erased and reprogrammed\n");
       } else if(buf[1] == STATUS_CLOCK_ERROR) {
         pmsg_error("target clock speed error\n");
         return -2;
