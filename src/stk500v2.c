@@ -1100,7 +1100,9 @@ static int stk500v2_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
 
   if(stk500v2_is_pic_part(p)) {
     // PIC: the firmware runs ICSP itself; AVR SPI opcodes do not apply
-    if(str_casestarts(pgm->port, "avrdoper") && !my.device_id_set) {
+    // The firmware needs the device identity to resolve ICSP parameters,
+    // regardless of transport (HID/WinUSB/CDC) and port name.
+    if(!my.device_id_set) {
       if(stk500v2_set_device_id(pgm, p) < 0)
         return -1;
     }

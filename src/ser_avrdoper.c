@@ -109,6 +109,8 @@ static const int reportDataSizes[2] = { 29, 61 };
  */
 #define AVRDOPER_HID_SAFE_DATA_SIZE 61
 #define AVRDOPER_HID_IO_RETRIES 5
+#define AVRDOPER_HID_RESP_TIMEOUT_MS 5000
+#define AVRDOPER_HID_DRAIN_TIMEOUT_MS 50
 
 static void avrdoper_sleep_ms(unsigned int ms) {
 #if defined(_WIN32)
@@ -232,7 +234,7 @@ static int usbSetReport(const union filedescriptor *fdp, int reportType, char *b
 
 // -------------------------------------------------------------------------
 
-static int usbGetReport(const union filedescriptor *fdp, int reportType, int reportNumber, char *buffer, int *len) {
+static int usbGetReport(const union filedescriptor *fdp, int reportType, int reportNumber, char *buffer, int *len, int timeout_ms) {
   hid_device *udev = (hid_device *) fdp->usb.handle;
   int bytesReceived = -1;
   int requestLen = *len;
@@ -242,7 +244,7 @@ static int usbGetReport(const union filedescriptor *fdp, int reportType, int rep
     *len = requestLen;
     switch(reportType) {
     case USB_HID_REPORT_TYPE_INPUT:
-      bytesReceived = hid_read_timeout(udev, (unsigned char *) buffer, *len, 5000);
+      bytesReceived = hid_read_timeout(udev, (unsigned char *) buffer, *len, timeout_ms);
       break;
     case USB_HID_REPORT_TYPE_OUTPUT:
       break;
@@ -397,7 +399,7 @@ static int avrdoper_send(const union filedescriptor *fdp, const unsigned char *b
  * Read HID input reports into the internal RX buffer.
  * Returns: 0 = data received, 1 = no data (read timeout), -1 = transport error.
  * ------------------------------------------------------------------------- */
-static int avrdoperFillBuffer(const union filedescriptor *fdp) {
+static int avrdoperFillBuffer(const union filedescriptor *fdp, int timeout_ms) {
   int bytesPending = reportDataSizes[1];        // Guess how much data is buffered in device
 
   cx->sad_avrdoperRxPosition = cx->sad_avrdoperRxLength = 0;
@@ -409,7 +411,7 @@ static int avrdoperFillBuffer(const union filedescriptor *fdp) {
     if(reportDataSizes[lenIndex] + 2 > len)     // Requested data would not fit into buffer
       break;
     len = reportDataSizes[lenIndex] + 2;
-    usbErr = usbGetReport(fdp, USB_HID_REPORT_TYPE_INPUT, lenIndex + 1, (char *) buffer, &len);
+    usbErr = usbGetReport(fdp, USB_HID_REPORT_TYPE_INPUT, lenIndex + 1, (char *) buffer, &len, timeout_ms);
     if(usbErr != 0) {
       pmsg_error("USB %s\n", usbErrorText(usbErr));
       return -1;
@@ -439,7 +441,7 @@ static int avrdoper_recv(const union filedescriptor *fdp, unsigned char *buf, si
     int len, available = cx->sad_avrdoperRxLength - cx->sad_avrdoperRxPosition;
 
     if(available <= 0) {        // Buffer is empty
-      int r = avrdoperFillBuffer(fdp);
+      int r = avrdoperFillBuffer(fdp, AVRDOPER_HID_RESP_TIMEOUT_MS);
       if(r < 0)
         return -1;
       if(r == 1) {              // No response within the read timeout
@@ -463,7 +465,7 @@ static int avrdoper_recv(const union filedescriptor *fdp, unsigned char *buf, si
 
 static int avrdoper_drain(const union filedescriptor *fdp, int display) {
   do {
-    int r = avrdoperFillBuffer(fdp);
+    int r = avrdoperFillBuffer(fdp, AVRDOPER_HID_DRAIN_TIMEOUT_MS);
     if(r < 0)
       return -1;
   } while(cx->sad_avrdoperRxLength > 0);
