@@ -1,4 +1,4 @@
-/*
+﻿/*
  * avrdude - A Downloader/Uploader for AVR device programmers
  * Copyright (C) 2005 Erik Walthinsen
  * Copyright (C) 2002-2004 Brian S. Dean <bsd@bdmicro.com>
@@ -1124,8 +1124,8 @@ static int stk500v2_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
     // Activate AVR-style (low active) RESET
     stk500v2_setparm_real(pgm, PARAM_RESET_POLARITY, 0x01);
 
-  // DFM: Only avrdoper sends device identity, and only once per avrdude session
-  if(str_casestarts(pgm->port, "avrdoper") && !my.device_id_set) {
+  // DFM: send device identity once per avrdude session (all transports)
+  if(!my.device_id_set) {
     if(stk500v2_set_device_id(pgm, p) < 0)
       return -1;
   }
@@ -2037,8 +2037,8 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       unsigned int mode = 0;
       int sscanf_success = sscanf(extended_param, "workmode=%u", &mode);
 
-      if(sscanf_success < 1 || mode > 3) {
-        pmsg_error("invalid value in -x %s; use -x workmode=<0..3>\n", extended_param);
+      if(sscanf_success < 1 || mode < 1 || mode > 2) {
+        pmsg_error("invalid value in -x %s; use -x workmode=<1..2>\n", extended_param);
         rv = -1;
         break;
       }
@@ -2144,7 +2144,7 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       msg_error("  -x fosc=off       Switch the oscillator clock off\n");
     }
     msg_error("  -x xtal=<n>[unit] Set programmer xtal frequency to <n> Hz (or kHz/MHz)\n");
-    msg_error("  -x workmode=<0..3> Set DFM work mode: 0 simulate, 1 online, 2 record, 3 online+record\n");
+    msg_error("  -x workmode=<1..2> Set DFM work mode: 1 online, 2 record offline data (no target programming)\n");
     msg_error("  -x offline=info   Show DFM offline package count and active index\n");
     msg_error("  -x offline=list   List DFM offline package summaries\n");
     msg_error("  -x offline=active:<n> Set DFM active offline package index\n");

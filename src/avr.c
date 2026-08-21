@@ -1,4 +1,4 @@
-/*
+﻿/*
  * avrdude - A Downloader/Uploader for AVR device programmers
  * Copyright (C) 2000-2004 Brian S. Dean <bsd@bdmicro.com>
  * Copyright (C) 2011 Darell Tan <darell.tan@gmail.com>
@@ -965,7 +965,10 @@ int avr_update_byte(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *mem,
   pmsg_debug("%s(%s, %s, %s, %s, 0x%02x)\n", __func__, pgmid, p->id, mem->desc,
     str_ccaddress(addr, mem->size), data);
 
-  if(avr_can_skip_write_byte(pgm, p, mem, addr, data, NULL))
+  /* DFM: always write fuse/lock bits even if the current value matches, so the
+   * record-mode offline package keeps the PROGRAM_FUSE/LOCK frames for replay. */
+  if(!(mem_is_a_fuse(mem) || mem_is_lock(mem)) &&
+     avr_can_skip_write_byte(pgm, p, mem, addr, data, NULL))
     return 0;
 
   if(mem_is_readonly(mem) || (pgm->readonly && pgm->readonly(pgm, p, mem, addr))) {
