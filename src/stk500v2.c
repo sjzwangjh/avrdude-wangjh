@@ -1234,6 +1234,12 @@ static int stk500hvsp_program_enable(const PROGRAMMER *pgm, const AVRPART *p) {
 
   my.lastpart = p;
 
+  // DFM: send device identity once per avrdude session (all transports)
+  if(!my.device_id_set) {
+    if(stk500v2_set_device_id(pgm, p) < 0)
+      return -1;
+  }
+
   buf[0] = my.pgmtype == PGMTYPE_STK600? CMD_ENTER_PROGMODE_HVSP_STK600: CMD_ENTER_PROGMODE_HVSP;
   buf[1] = p->hventerstabdelay;
   buf[2] = p->hvspcmdexedelay;
