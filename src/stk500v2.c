@@ -54,6 +54,7 @@
 #define DFM_OFFLINE_ACTION_INFO        1
 #define DFM_OFFLINE_ACTION_LIST        2
 #define DFM_OFFLINE_ACTION_SET_ACTIVE  3
+#define DFM_DEVICE_NAME_LEN            16
 #include "usbdevs.h"
 
 /*
@@ -130,7 +131,7 @@ static const struct jtagispentry jtagispcmds[] = {
   {CMD_SET_WORK_STATE, 2},
   {CMD_SET_PROG_STATE, 2},
   {CMD_GET_OFFLINE_INFO, 8},
-  {CMD_GET_OFFLINE_PACKAGE, (unsigned short) (2 + 1 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN)},
+  {CMD_GET_OFFLINE_PACKAGE, (unsigned short) (2 + 1 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN + DFM_DEVICE_NAME_LEN)},
   {CMD_SET_OFFLINE_ACTIVE, 2},
   {CMD_OSCCAL, 2},
   {CMD_LOAD_ADDRESS, 2},
@@ -2610,6 +2611,7 @@ static int stk500v2_offline_print_summary(const PROGRAMMER *pgm, unsigned int in
   unsigned char buf[160];
   char itemid[DFM_ITEM_ID_LEN + 1];
   char itemdesc[DFM_ITEM_DESC_LEN + 1];
+  char devname[DFM_DEVICE_NAME_LEN + 1];
   unsigned int used, state, pkg_index, arch, dev_index;
   unsigned long flash_addr, total_size, packet_count, crc32;
   int result;
@@ -2618,7 +2620,7 @@ static int stk500v2_offline_print_summary(const PROGRAMMER *pgm, unsigned int in
   buf[0] = CMD_GET_OFFLINE_PACKAGE;
   dfm_put_u16(&buf[1], index);
   result = stk500v2_command(pgm, buf, 3, sizeof(buf));
-  if(result < (int) (2 + 1 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN))
+  if(result < (int) (2 + 1 + 1 + 2 + 4 + 4 + 4 + 4 + 1 + 2 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN + DFM_DEVICE_NAME_LEN))
     return -1;
 
   used = buf[2];
@@ -2637,10 +2639,12 @@ static int stk500v2_offline_print_summary(const PROGRAMMER *pgm, unsigned int in
   stk500v2_format_itemid(&buf[25], itemid, sizeof(itemid));
   memset(itemdesc, 0, sizeof(itemdesc));
   memcpy(itemdesc, &buf[25 + DFM_ITEM_ID_LEN], DFM_ITEM_DESC_LEN);
+  memset(devname, 0, sizeof(devname));
+  memcpy(devname, &buf[25 + DFM_ITEM_ID_LEN + DFM_ITEM_DESC_LEN], DFM_DEVICE_NAME_LEN);
 
-  pmsg_notice("offline package %u: arch=%u device=0x%04x packets=%lu size=%lu flash=0x%08lx crc=0x%08lx itemid=%s itemdesc=\"%s\"\n",
-    pkg_index, arch, dev_index, packet_count, total_size, flash_addr, crc32,
-    itemid, itemdesc[0]? itemdesc: "");
+  pmsg_info("offline package %u: arch=%u device=%u (%s) packets=%lu size=%lu flash=0x%08lx crc=0x%08lx itemid=%s itemdesc=\"%s\"\n",
+    pkg_index, arch, dev_index, devname[0]? devname: "unknown",
+    packet_count, total_size, flash_addr, crc32, itemid, itemdesc[0]? itemdesc: "");
   return 0;
 }
 
@@ -2653,7 +2657,7 @@ static int stk500v2_offline_set_active(const PROGRAMMER *pgm, unsigned int index
   if(stk500v2_command(pgm, buf, 3, sizeof(buf)) < 0)
     return -1;
 
-  pmsg_notice("DFM active offline package set to %u\n", index);
+  pmsg_info("DFM active offline package set to %u\n", index);
   return 0;
 }
 
@@ -2670,9 +2674,9 @@ static int stk500v2_offline_run_action(const PROGRAMMER *pgm) {
     return -1;
 
   if(active == 0xffff)
-    pmsg_notice("DFM offline packages: %u/%u, active=none\n", count, max_count);
+    pmsg_info("DFM offline packages: %u/%u, active=none\n", count, max_count);
   else
-    pmsg_notice("DFM offline packages: %u/%u, active=%u\n", count, max_count, active);
+    pmsg_info("DFM offline packages: %u/%u, active=%u\n", count, max_count, active);
 
   if(my.offline_action == DFM_OFFLINE_ACTION_LIST) {
     for(unsigned int i = 0; i < max_count; i++)

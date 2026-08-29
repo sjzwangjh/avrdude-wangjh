@@ -221,6 +221,30 @@ static LISTID additional_config_files = NULL;
 
 static PROGRAMMER *pgm;
 
+static bool is_offline_only_extended_action(void) {
+  if(!extended_params || lsize(extended_params) == 0)
+    return false;
+
+  if(updates && lsize(updates) > 0)
+    return false;
+
+  for(LNODEID ln = lfirst(extended_params); ln; ln = lnext(ln)) {
+    const char *extended_param = ldata(ln);
+
+    if(str_eq(extended_param, "offline=info"))
+      continue;
+    if(str_eq(extended_param, "offline=list"))
+      continue;
+    if(str_starts(extended_param, "offline=active:"))
+      continue;
+    if(str_starts(extended_param, "offline=active="))
+      continue;
+    return false;
+  }
+
+  return true;
+}
+
 // Global options
 int verbose;                    // Verbose output
 int quell_progress;             // Quell progress report and un-verbose output
@@ -1504,6 +1528,10 @@ int main(int argc, char *argv[]) {
   is_open = 1;
 
   if(partdesc == NULL) {
+    if(is_offline_only_extended_action()) {
+      exitrc = 0;
+      goto main_exit;
+    }
     part_not_found(NULL);
     exitrc = 1;
     goto main_exit;
