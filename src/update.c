@@ -605,6 +605,28 @@ static int update_mem_from_all(const UPDATE *upd, const AVRPART *p, const AVRMEM
   // Copy input file contents into memory
   int size = m->size;
 
+  if(pic_is_pic_part(p->id) && mem_is_eeprom(m)) {
+    /*
+     * PIC EEPROM is represented in Intel HEX as 16-bit words at the physical
+     * EEPROM byte base.  The low byte is the EEPROM datum; compact it to the
+     * zero-based byte address used by the ICSP EEPROM programming command.
+     */
+    int highest = 0;
+    for(int i = 0; i < size; i++) {
+      int source = off + i*2;
+      if(source >= allsize)
+        break;
+      if(all->tags[source]) {
+        m->buf[i] = all->buf[source];
+        m->tags[i] = all->tags[source];
+        highest = i + 1;
+      }
+    }
+    if(highest == 0)
+      pmsg_warning("%s has no data for %s, skipping ...\n", str_infilename(upd->filename), m_name);
+    return highest;
+  }
+
   if(allsize - off < size)      // Clip to available data in input
     size = allsize > off? allsize - off: 0;
   if(is_memset(all->tags + off, 0, size)) // Nothing set? This memory was not present

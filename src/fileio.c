@@ -220,6 +220,8 @@ unsigned fileio_mem_offset(const AVRPART *p, const AVRMEM *mem) {
 
   unsigned location =
     mem_is_in_flash(mem)? MBASE(FLASH) + mem->offset - boffset(p, flash):
+    // PIC EEPROM offsets are physical Intel HEX byte addresses, not AVR's virtual EEPROM base.
+    fileio_pic_is_extra_mem(p, mem, "eeprom")? mem->offset:
     fileio_pic_is_extra_mem(p, mem, "userid")? mem->offset:
     fileio_pic_is_extra_mem(p, mem, "config")? mem->offset:
     mem_is_io(mem) || mem_is_sram(mem)? MBASE(DATA) + mem->offset:

@@ -1409,6 +1409,11 @@ static int stk500v2_initialize(const PROGRAMMER *pgm, const AVRPART *p) {
     usleep(10000);
   }
 
+  // Identity selects the firmware's AVR/PIC programming path and must exist
+  // before START_PROG opens an offline capture item.
+  if(!my.device_id_set && stk500v2_set_device_id(pgm, p) < 0)
+    return -1;
+
   if(my.workmode_set && stk500v2_set_prog_state(pgm, 1) < 0)
     return -1;
 
@@ -1559,6 +1564,10 @@ static int stk500v2_jtag3_initialize(const PROGRAMMER *pgm, const AVRPART *p) {
   my.flash_pagecache = mmt_malloc(my.flash_pagesize);
   my.eeprom_pagecache = mmt_malloc(my.eeprom_pagesize);
   my.flash_pageaddr = my.eeprom_pageaddr = ~0UL;
+
+  // Keep the identity-before-recording contract for this initialization path.
+  if(!my.device_id_set && stk500v2_set_device_id(pgm, p) < 0)
+    return -1;
 
   if(my.workmode_set && stk500v2_set_prog_state(pgm, 1) < 0)
     return -1;
@@ -1745,6 +1754,10 @@ static int stk500hv_initialize(const PROGRAMMER *pgm, const AVRPART *p, enum hvm
   my.flash_pagecache = mmt_malloc(my.flash_pagesize);
   my.eeprom_pagecache = mmt_malloc(my.eeprom_pagesize);
   my.flash_pageaddr = my.eeprom_pageaddr = ~0UL;
+
+  // HVSP/PP uses the same identity-before-recording contract as ISP/ICSP.
+  if(!my.device_id_set && stk500v2_set_device_id(pgm, p) < 0)
+    return -1;
 
   if(my.workmode_set && stk500v2_set_prog_state(pgm, 1) < 0)
     return -1;
