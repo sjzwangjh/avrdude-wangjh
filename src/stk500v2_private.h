@@ -205,6 +205,7 @@
 #define PARAM_RESET_POLARITY                0x9E        // STK500 only, and STK600 FW version <= 2.0.3
 #define PARAM_CONTROLLER_INIT               0x9F
 #define PARAM_DEVICE_IDENTITY               0xB6        // DFM: family(1B)+index(2B)+item_id(12B)+item_desc(64B)
+#define PARAM_APP_IMAGE_INFO                0xB7        // DFM: ASCII app-version '-' build-time
 
 #define DFM_ITEM_ID_LEN                     12
 #define DFM_ITEM_DESC_LEN                   64
@@ -297,6 +298,9 @@ struct pdata {
   // DFM offline package management command requested through -x offline=...
   int offline_action;
   unsigned short offline_index;
+
+  // DFM programmer information query requested through -x appinfo
+  bool app_info_requested;
 
   // DFM device identity sent via PARAM_DEVICE_IDENTITY
   bool device_id_set;

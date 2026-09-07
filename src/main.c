@@ -235,6 +235,8 @@ static bool is_offline_only_extended_action(void) {
       continue;
     if(str_eq(extended_param, "offline=list"))
       continue;
+    if(str_eq(extended_param, "appinfo"))
+      continue;
     if(str_starts(extended_param, "offline=active:"))
       continue;
     if(str_starts(extended_param, "offline=active="))

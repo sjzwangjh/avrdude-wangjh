@@ -303,6 +303,7 @@ static unsigned int stk500v2_mode_for_pagesize(unsigned int pagesize);
 static double stk500v2_sck_to_us(const PROGRAMMER *pgm, unsigned char dur);
 static int stk500v2_set_sck_period_mk2(const PROGRAMMER *pgm, double v);
 static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p);
+static int stk500v2_get_app_image_info(const PROGRAMMER *pgm, char *value, size_t value_size);
 static int stk500v2_set_prog_state(const PROGRAMMER *pgm, unsigned char state);
 static int stk500v2_offline_run_action(const PROGRAMMER *pgm);
 static int stk500v2_parse_itemid_bcd(const char *text, unsigned char out[DFM_ITEM_ID_LEN]);
@@ -331,6 +332,7 @@ void stk500v2_setup(PROGRAMMER *pgm) {
   my.workmode_data = 1;
   my.offline_action = DFM_OFFLINE_ACTION_NONE;
   my.offline_index = 0;
+  my.app_info_requested = false;
   my.device_id_set = false;
   my.device_family = 0;
   my.device_index = 0;
@@ -2067,6 +2069,11 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       continue;
     }
 
+    if(str_eq(extended_param, "appinfo")) {
+      my.app_info_requested = true;
+      continue;
+    }
+
     if(str_starts(extended_param, "offline=")) {
       const char *arg = extended_param + strlen("offline=");
 
@@ -2165,6 +2172,7 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
     }
     msg_error("  -x xtal=<n>[unit] Set programmer xtal frequency to <n> Hz (or kHz/MHz)\n");
     msg_error("  -x workmode=<1..2> Set DFM work mode: 1 online, 2 record offline data (no target programming)\n");
+    msg_error("  -x appinfo        Show connected DFM programmer and App image information\n");
     msg_error("  -x offline=info   Show DFM offline package count and active index\n");
     msg_error("  -x offline=list   List DFM offline package summaries\n");
     msg_error("  -x offline=active:<n> Set DFM active offline package index\n");
@@ -2498,6 +2506,31 @@ static int stk500v2_set_device_id(const PROGRAMMER *pgm, const AVRPART *p) {
   return 0;
 }
 
+static int stk500v2_get_app_image_info(const PROGRAMMER *pgm, char *value, size_t value_size) {
+  unsigned char buf[64];
+  int status;
+  size_t payload_len;
+
+  if(value == NULL || value_size < 2)
+    return -1;
+
+  buf[0] = CMD_GET_PARAMETER;
+  buf[1] = PARAM_APP_IMAGE_INFO;
+  status = stk500v2_command(pgm, buf, 2, sizeof(buf));
+  if(status < 9) {
+    pmsg_warning("cannot get application image information\n");
+    return -1;
+  }
+
+  // stk500v2_command() returns payload bytes plus the 6-byte STK frame envelope.
+  payload_len = (size_t)(status - 8);
+  if(payload_len >= value_size)
+    payload_len = value_size - 1;
+  memcpy(value, buf + 2, payload_len);
+  value[payload_len] = '\0';
+  return 0;
+}
+
 static int stk500v2_pic_verify_deviceid_once(const PROGRAMMER *pgm, const AVRPART *p) {
   unsigned char buf[8];
   unsigned int read_value;
@@ -2783,6 +2816,23 @@ static int stk500v2_open(PROGRAMMER *pgm, const char *port) {
   // Drain any extraneous input, synchronise and drain again
   if(stk500v2_drain(pgm, 0) < 0 || stk500v2_getsync(pgm) < 0 || stk500v2_drain(pgm, 0) < 0)
     return -1;
+
+  if(my.app_info_requested) {
+    char app_image_info[64];
+    unsigned char hw = 0;
+    unsigned char major = 0;
+    unsigned char minor = 0;
+
+    pmsg_notice("DFM programmer model : %s\n", pgmname(pgm));
+    if(pgm->usbsn && *pgm->usbsn)
+      pmsg_notice("DFM USB serial      : %s\n", pgm->usbsn);
+    if(stk500v2_getparm(pgm, PARAM_HW_VER, &hw) == 0 &&
+       stk500v2_getparm(pgm, PARAM_SW_MAJOR, &major) == 0 &&
+       stk500v2_getparm(pgm, PARAM_SW_MINOR, &minor) == 0)
+      pmsg_notice("DFM controller FW   : HW %u, %u.%02u\n", hw, major, minor);
+    if(stk500v2_get_app_image_info(pgm, app_image_info, sizeof(app_image_info)) == 0)
+      pmsg_notice("DFM application image : %s\n", app_image_info);
+  }
 
   if(my.workmode_set) {
     if(stk500v2_set_state(pgm, my.workmode_data) < 0)
