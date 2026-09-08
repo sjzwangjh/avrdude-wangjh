@@ -147,7 +147,7 @@ INF  [Ii][Nn][Ff]([Ii][Nn][Ii][Tt][Yy])?
 
 
 (?x: desc | prog_modes | is_serialadapter | extra_features | baudrate | usbvid | usbdev | usbsn | usbvendor | usbproduct |
-  family_id | mcuid | deviceid_addr | deviceid_mask | deviceid_expected | archnum | n_interrupts | n_page_erase | n_boot_sections | boot_section_size |
+  family_id | mcuid | deviceid_addr | deviceid_mask | deviceid_expected | inst_bits | config_mask0 | config_mask1 | config_mask2 | config_mask3 | archnum | n_interrupts | n_page_erase | n_boot_sections | boot_section_size |
   hvupdi_variant | stk500_devcode | avr910_devcode | chip_erase_delay | pagel | bs2 |
   timeout | stabdelay | cmdexedelay | synchloops | bytedelay | pollindex | pollvalue | predelay | postdelay | pollmethod |
   hventerstabdelay | progmodedelay | latchcycles | togglevtg | poweroffdelay | resetdelayms | resetdelayus | resetdelay | hvleavestabdelay |

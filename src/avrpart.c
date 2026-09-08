@@ -956,6 +956,11 @@ AVRPART *avr_new_part(void) {
   p->deviceid_addr = 0;
   p->deviceid_mask = 0;
   p->deviceid_expected = 0;
+  p->config_mask0 = 0x3FFF;     // PIC config words default to fully implemented
+  p->config_mask1 = 0x3FFF;
+  p->config_mask2 = 0x3FFF;
+  p->config_mask3 = 0x3FFF;
+  p->inst_bits = 14;            // PIC instruction width; 12-bit parts are set from conf
   p->hvupdi_variant = -1;
   p->autobaud_sync = 0x30;      // STK_GET_SYNC
   memset(p->signature, 0xFF, 3);

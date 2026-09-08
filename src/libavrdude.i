@@ -379,6 +379,14 @@ typedef struct avrpart {
   const char  * parent_id;      /* Used by developer options */
   const char  * family_id;      /* family id in the SIB (avr8x) */
   int           prog_modes;     /* Programming interfaces, see #define PM_... */
+  unsigned int  deviceid_addr;  /* PIC ICSP device-id read address (0 = unavailable) */
+  unsigned int  deviceid_mask;  /* PIC ICSP device-id compare mask */
+  unsigned int  deviceid_expected; /* PIC ICSP expected device-id value */
+  unsigned int  config_mask0;   /* PIC config word 0 implemented-bit mask */
+  unsigned int  config_mask1;   /* PIC config word 1 implemented-bit mask */
+  unsigned int  config_mask2;   /* PIC config word 2 implemented-bit mask */
+  unsigned int  config_mask3;   /* PIC config word 3 implemented-bit mask */
+  int           inst_bits;      /* PIC instruction width in bits (12 or 14) */
   unsigned char signature[3];   /* expected value of signature bytes */
   unsigned short usbpid;        /* USB DFU product ID (0 = none) */
   LISTID        mem;            /* avr memory definitions */
@@ -399,6 +407,7 @@ typedef struct avrmem {
   int num_pages;                /* number of pages (if page addressed) */
   int initval;                  /* factory setting of fuses and lock bits */
   int bitmask;                  /* bits used in fuses and lock bits */
+  int offset;                   /* file/device offset of this memory in bytes */
   %mutable;
   unsigned char * buf;          /* pointer to memory buffer */
 } AVRMEM;
@@ -743,6 +752,9 @@ PROGRAMMER *locate_programmer(const LISTID programmers, const char *configid);
 }
 %feature("autodoc", "avr_read_mem(PROGRAMMER pgm, AVRPART p, AVRMEM mem, AVRPART v=None -> int; v: verify against") avr_read_mem;
 int avr_read_mem(const PROGRAMMER * pgm, const AVRPART *p, const AVRMEM *mem, const AVRPART *v = NULL);
+
+%feature("autodoc", "avrdude_pic_read_chipid(PROGRAMMER pgm, AVRPART p) -> int; Read the 16-bit PIC ICSP chip id on demand (0..0xFFFF), or -1 on error / no chip id") avrdude_pic_read_chipid;
+int avrdude_pic_read_chipid(const PROGRAMMER *pgm, const AVRPART *p);
 %clear AVRMEM *mem;
 
 %typemap(check) AVRMEM *mem {

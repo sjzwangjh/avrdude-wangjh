@@ -1,4 +1,4 @@
-﻿/*
+/*
  * avrdude - A Downloader/Uploader for AVR device programmers
  * Copyright (C) 2005 Erik Walthinsen
  * Copyright (C) 2002-2004 Brian S. Dean <bsd@bdmicro.com>
@@ -2565,6 +2565,31 @@ static int stk500v2_pic_verify_deviceid_once(const PROGRAMMER *pgm, const AVRPAR
     read_value, p->deviceid_mask);
   my.icsp_deviceid_checked = true;
   return 0;
+}
+
+// DFM: on-demand read of the 16-bit PIC ICSP chip id (device-id). Unlike the
+// once-per-session verification above this call can be repeated any time, eg,
+// by a GUI "read chip id" button. Returns the chip id 0..0xFFFF, or -1 when
+// the part is no PIC part, has no chip id, or the read fails.
+int avrdude_pic_read_chipid(const PROGRAMMER *pgm, const AVRPART *p) {
+  unsigned char buf[8];
+  unsigned int read_value;
+
+  if(!stk500v2_is_pic_part(p))
+    return -1;
+
+  if(p->deviceid_addr == 0 || p->deviceid_expected == 0)
+    return -1;                   // baseline part or part without an expected id
+
+  memset(buf, 0, sizeof(buf));
+  buf[0] = CMD_READ_SIGNATURE_ICSP;
+  if(stk500v2_command(pgm, buf, 1, sizeof(buf)) < 0) {
+    pmsg_error("ICSP deviceID read failed\n");
+    return -1;
+  }
+
+  read_value = dfm_get_u16(&buf[2]);
+  return (int) read_value;
 }
 
 static const char *stk500v2_workmode_name(unsigned char mode) {

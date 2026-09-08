@@ -345,6 +345,11 @@ typedef struct avrpart {
   unsigned int deviceid_addr;   // PIC ICSP device-id read address (0 = unavailable)
   unsigned int deviceid_mask;   // PIC ICSP device-id compare mask
   unsigned int deviceid_expected; // PIC ICSP expected device-id value
+  unsigned int config_mask0;    // PIC config word 0 implemented-bit mask (0x3FFF = fully implemented)
+  unsigned int config_mask1;    // PIC config word 1 implemented-bit mask
+  unsigned int config_mask2;    // PIC config word 2 implemented-bit mask
+  unsigned int config_mask3;    // PIC config word 3 implemented-bit mask
+  int inst_bits;                // PIC instruction width in bits (12 or 14, 0 = unspecified)
   int archnum;                  // Avr-gcc architecture number for the part
   int n_interrupts;             // Number of interrupts, used for vector bootloaders
   int n_page_erase;             // If set, number of pages erased during NVM erase
@@ -1202,6 +1207,10 @@ extern "C" {
     unsigned long addr, unsigned char *value);
   int avr_read_mem(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *mem, const AVRPART *v);
   int avr_read(const PROGRAMMER *pgm, const AVRPART *p, const char *memstr, const AVRPART *v);
+
+  // DFM: read the 16-bit PIC ICSP device-id (chip id) on demand. Returns the
+  // chip id 0..0xFFFF, or -1 on error / for non-PIC parts / parts without an id
+  int avrdude_pic_read_chipid(const PROGRAMMER *pgm, const AVRPART *p);
   int avr_write_page(const PROGRAMMER *pgm, const AVRPART *p, const AVRMEM *mem, unsigned long addr);
 
   uint64_t avr_ustimestamp(void);

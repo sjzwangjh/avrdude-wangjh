@@ -27,6 +27,7 @@ import os
 import pathlib
 import re
 import time
+import tempfile
 
 scriptdir = pathlib.Path(__file__).resolve().parent
 installdir = scriptdir.parent.parent
@@ -90,9 +91,35 @@ def avrdude_init():
 
     for d in search_dirs:
         p = pathlib.Path(d) / "avrdude.conf"
-        if p.is_file():
+        if not p.is_file():
+            continue
+
+        # DFM: the PIC part database lives in picdude.conf; merge it into the
+        # config stream so AVR and PIC parts are available side by side.
+        probe_dirs = list(search_dirs)
+        extra = str(scriptdir.parent)      # source tree: avrdude/src/picdude.conf
+        if extra not in probe_dirs:
+            probe_dirs.append(extra)
+        pic_found = None
+        for d2 in probe_dirs:
+            q = pathlib.Path(d2) / "picdude.conf"
+            if q.is_file():
+                pic_found = q
+                break
+        if pic_found is None:
             ad.read_config(str(p))
             return (True, f"Found avrdude.conf in {d}")
+
+        merged = pathlib.Path(tempfile.gettempdir()) / "avrdude_merged_pic.conf"
+        try:
+            data = p.read_text(encoding="utf-8", errors="replace") + "\n" \
+                + pic_found.read_text(encoding="utf-8", errors="replace")
+            merged.write_text(data, encoding="utf-8")
+            ad.read_config(str(merged))
+            return (True, f"Found avrdude.conf (+ picdude.conf) in {d}")
+        except OSError as e:
+            ad.read_config(str(p))
+            return (True, f"Found avrdude.conf in {d} (picdude.conf merge skipped: {e})")
 
     return (False, "Sorry, no avrdude.conf could be found.")
 
@@ -103,6 +130,7 @@ def classify_devices():
         'atmega': [],
         'atxmega': [],
         'avr_de': [],
+        'pic': [],
         'other': []
     }
     avr_de_re = re.compile(r'AVR\d+[A-Z][A-Z]\d+')
@@ -121,6 +149,8 @@ def classify_devices():
                 result['atxmega'].append(p.desc)
             elif avr_de_re.match(p.desc):
                 result['avr_de'].append(p.desc)
+            elif p.desc.startswith('PIC'):
+                result['pic'].append(p.desc)
             else:
                 result['other'].append(p.desc)
     return result
@@ -624,6 +654,10 @@ class adgui(QObject):
         self.memories.ee_avr.setScene(gsc)
         self.memories.fuse_avr.setScene(gsc)
 
+        # DFM: programmatically add the PIC "Config" (config words) tab; it is
+        # hex-file based, so memories.ui does not need a new page definition.
+        self._build_pic_config_tab()
+
         if self.darkmode:
             # adjust signature value stylesheets
             self.memories.configSig.setStyleSheet("background-color: rgb(0, 0, 0);")
@@ -710,6 +744,9 @@ class adgui(QObject):
             self.memories.fuse_save.pressed.connect(self.fuses_save)
             self.memories.fuse_load.pressed.connect(self.fuses_load)
             self.memories.fuse_filename.editingFinished.connect(self.detect_fuses_file)
+            self.memories.pic_read.pressed.connect(self.pic_read)
+            self.memories.pic_program.pressed.connect(self.pic_program)
+            self.memories.pic_clear.pressed.connect(self.pic_clear)
             for w in self.memories.groupBox_13.children():
                 if w.objectName().startswith('fval'):
                     # functools.partial() is black magic, it allows to
@@ -952,12 +989,18 @@ class adgui(QObject):
 
     def update_device_cb(self):
         fams = list(self.devices.keys())
-        #fams.sort()
         self.device.devices.clear()
         l = []
         for f in fams:
-            obj = eval('self.device.' + f + '.isChecked()')
-            if obj:
+            if f == 'pic':
+                # DFM: PIC devices are always offered in the combo box; no
+                # check box is needed to show or hide them.
+                for d in self.devices[f]:
+                    self.device.devices.addItem(d)
+                    l.append(d)
+                continue
+            w = getattr(self.device, f, None)
+            if w is not None and w.isChecked():
                 for d in self.devices[f]:
                     self.device.devices.addItem(d)
                     l.append(d)
@@ -1040,6 +1083,10 @@ class adgui(QObject):
         self.devcfg = ad.get_config_table(self.dev.desc)
         if not self.devcfg:
             self.log("No configuration table found", ad.MSG_WARNING)
+        # DFM: keep the memory pages of PIC parts locked until the chip id
+        # (or the "no chip id" baseline case) has been confirmed live.
+        if (self.dev.desc or '').startswith('PIC'):
+            self._lock_pic_pages()
         if self.port != "set_this" and self.prog_selected and self.dev_selected:
             self.adgui.actionAttach.setEnabled(True)
 
@@ -1116,13 +1163,40 @@ class adgui(QObject):
             self.log('Could not open programmer', ad.MSG_ERROR)
         else:
             self.pgm.enable(self.dev)
-            self.pgm.initialize(self.dev)
+            rc = self.pgm.initialize(self.dev)
+            # CLI semantics (main.c): init_ok = rc >= 0; only a negative rc is
+            # a hard failure (eg, no target / ICSP device-id check failed).
+            if rc < 0:
+                # DFM: never report a live session when the programmer failed
+                # to initialize, eg, when the ICSP device-id check failed.
+                self.log(f'Programmer initialize failed (rc={rc}; target not '
+                         'verified or not in programming mode)', ad.MSG_ERROR)
+                try:
+                    self.pgm.disable()
+                    self.pgm.close()
+                    self.pgm.teardown()
+                except Exception:
+                    pass
+                self.connected = False
+                return
+            if rc > 0:
+                self.log(f'Programmer initialize returned rc={rc} (accepted, '
+                         'same as CLI init_ok = rc >= 0)', ad.MSG_NOTICE)
             self.log('Programmer successfully started')
             self.adgui.actionProgramming.setEnabled(True)
             self.adgui.actionAttach.setEnabled(False)
             self.adgui.actionDetach.setEnabled(True)
             self.connected = True
             self.fuses_warned = {}
+            if (self.dev.desc or '').startswith('PIC'):
+                if self.dev.deviceid_addr == 0 or self.dev.deviceid_expected == 0:
+                    # baseline PIC part: no chip id, identity is trivially ok
+                    self.log("PIC baseline part attached: no chip id to verify", ad.MSG_NOTICE)
+                    self._unlock_memory_pages()
+                else:
+                    self._lock_pic_pages()
+                    self.log("PIC part attached: read the chip id to verify it "
+                             "before programming (Signature tab)", ad.MSG_NOTICE)
 
     def stop_programmer(self):
         if self.connected:
@@ -1139,38 +1213,334 @@ class adgui(QObject):
         self.settings.sync()
         self.stop_programmer()
 
+    def _has_mem(self, name):
+        if self.dev is None:
+            return False
+        return ad.avr_locate_mem(self.dev, name) is not None
+
+    def _is_pic_word_mem(self, memname):
+        # DFM: PIC 10/12/16 flash/config/userid are 14-bit word memories
+        if self.dev is None or not (self.dev.desc or '').startswith('PIC'):
+            return False
+        return str(memname).lower() in ('flash', 'config', 'userid')
+
+    def _pic_word_norm(self, data):
+        # DFM: each 2 bytes hold one instruction word (low byte + the high
+        # bits given by the part's inst_bits: 12-bit parts store words up to
+        # 0xFFF, 14-bit parts up to 0x3FFF). Bits above the instruction width
+        # are not stored by the device and read back as 0, so mask the high
+        # byte accordingly before comparing (an erased word reads 0xFFF or
+        # 0x3FFF, while hex files often carry 0xFFFF).
+        if not data:
+            return data
+        mbits = 14
+        try:
+            v = getattr(self.dev, 'inst_bits', 0)
+            if v:
+                mbits = int(v)
+        except Exception:
+            pass
+        mbits = max(8, min(mbits, 16))
+        hmask = 0xFF if mbits >= 16 else (1 << (mbits - 8)) - 1
+        ba = bytearray(data)
+        for i in range(1, len(ba), 2):
+            ba[i] &= hmask
+        return bytes(ba)
+
+    def _config_word_eq(self, ea, ga):
+        # DFM: compare two config-word buffers word by word on the implemented
+        # bits only (config_maskN from picdude.conf). Reserved/unimplemented
+        # bits read back as 1 and must not fail the verification.
+        n = min(len(ea), len(ga))
+        for w in range(n // 2):
+            impl = 0x3FFF
+            for k in range(4):
+                if w == k:
+                    impl = int(getattr(self.dev, f'config_mask{k}', 0x3FFF) or 0x3FFF)
+                    break
+            e = (ea[2*w] | (ea[2*w + 1] << 8))
+            a = (ga[2*w] | (ga[2*w + 1] << 8))
+            if (e & impl) != (a & impl):
+                return (False, 2*w)
+        return (True, None)
+
+    def _unlock_memory_pages(self):
+        # DFM: enable exactly the memory pages that exist on the selected part
+        self.memories.flash.setEnabled(self._has_mem('flash'))
+        self.memories.eeprom.setEnabled(self._has_mem('eeprom'))
+        self.memories.fuses.setEnabled(False)      # PIC devices have no fuse bytes
+        self.memories.picconfig.setEnabled(self._has_mem('config'))
+
+    def _lock_pic_pages(self):
+        # DFM: keep PIC programming pages locked until chip-id verification
+        self.memories.flash.setEnabled(False)
+        self.memories.eeprom.setEnabled(False)
+        self.memories.fuses.setEnabled(False)
+        self.memories.picconfig.setEnabled(False)
+
+    def _config_width(self):
+        # digits per config word: 12-bit parts 3, 14-bit parts 4
+        bits = 14
+        try:
+            v = getattr(self.dev, 'inst_bits', 0)
+            if v:
+                bits = int(v)
+        except Exception:
+            pass
+        return (max(8, min(bits, 16)) + 3) // 4
+
+    def _parse_config_words(self, text):
+        out = []
+        for tok in text.replace(',', ' ').split():
+            tok = tok.strip()
+            try:
+                out.append(int(tok, 16))
+            except ValueError:
+                continue
+        return out
+
+    def _config_words_to_text(self, words):
+        return " ".join(f"{w:0{self._config_width()}X}" for w in words)
+
+    def _config_default_words(self):
+        # DFM: default config value per word = its config_maskN (implemented
+        # bits) from picdude.conf, falling back to 0x3FFF.
+        m = ad.avr_locate_mem(self.dev, 'config') if self.dev else None
+        if m is None:
+            return []
+        words = []
+        for i in range(int(m.size) // 2):
+            try:
+                words.append(int(getattr(self.dev, f'config_mask{i}', 0x3FFF) or 0x3FFF))
+            except Exception:
+                words.append(0x3FFF)
+        return words
+
+    def _set_config_box(self, words):
+        self.memories.pic_words.setText(self._config_words_to_text(words))
+
+    def _config_box_words(self):
+        return self._parse_config_words(self.memories.pic_words.text())
+
+    def _config_words_from_buffer(self, m):
+        raw = m.get(int(m.size))
+        nw = int(m.size) // 2
+        words = []
+        for i in range(nw):
+            lo = raw[2*i] if raw is not None and 2*i < len(raw) else 0xFF
+            hi = raw[2*i+1] if raw is not None and 2*i+1 < len(raw) else 0xFF
+            words.append((lo | (hi << 8)) & 0x3FFF)
+        return words
+
+    def _config_words_to_image(self, words, m):
+        image = bytearray([0xFF]) * int(m.size)
+        for i, w in enumerate(words[: int(m.size) // 2]):
+            image[2*i] = w & 0xFF
+            image[2*i+1] = (w >> 8) & 0xFF
+        return bytes(image)
+
+    def _config_load_from_hex(self, fname):
+        # DFM: extract the config words from the hex config window and show
+        # them in the Config box (mirrors update_mem_from_all window rules).
+        if self.dev is None or not (self.dev.desc or '').startswith('PIC'):
+            return
+        m = ad.avr_locate_mem(self.dev, 'config')
+        if m is None:
+            return
+        data, alloc = self._hex_flat_map(fname)
+        if data is None:
+            return
+        image, top = self._pic_region_bytes(data, alloc, 'config')
+        if image is None or top <= 0:
+            self.memories.pic_buffer.setText("hex 中无 config 字")
+            return
+        words = [(image[2*i] | (image[2*i + 1] << 8)) & 0x3FFF
+                 for i in range(top // 2)]
+        self._set_config_box(words)
+        self.memories.pic_buffer.setText(
+            "hex config: " + self._config_words_to_text(words))
+
+    def _build_pic_config_tab(self):
+        """DFM: build the PIC 'Config' (config words) tab programmatically.
+
+        The text box holds the config words as space separated hex values.
+        Values are filled from the hex config window when a hex file is
+        loaded, or read back from the device; edited values are exactly what
+        Program burns. Clear sets the words to their default (config_maskN).
+        """
+        page = QWidget()
+        page.setObjectName('picconfig')
+        v = QVBoxLayout(page)
+
+        row0 = QHBoxLayout()
+        lbl = QLabel("Config 字(空格分隔 十六进制):")
+        self.memories.pic_words = QLineEdit()
+        self.memories.pic_words.setPlaceholderText(
+            "CONFIG1 CONFIG2 ... （如 09C4 1EFF）")
+        row0.addWidget(lbl)
+        row0.addWidget(self.memories.pic_words, 1)
+        v.addLayout(row0)
+
+        rowb = QHBoxLayout()
+        self.memories.pic_read = QPushButton("Read config")
+        self.memories.pic_program = QPushButton("Program")
+        self.memories.pic_clear = QPushButton("Clear")
+        for b in (self.memories.pic_read, self.memories.pic_program,
+                  self.memories.pic_clear):
+            rowb.addWidget(b)
+        rowb.addStretch(1)
+        v.addLayout(rowb)
+
+        self.memories.pic_buffer = QLabel("")
+        self.memories.pic_buffer.setWordWrap(True)
+        v.addWidget(self.memories.pic_buffer)
+        v.addStretch(1)
+
+        page.setLayout(v)
+        self.memories.picconfig = page
+        self.memories.tabWidget.addTab(page, "Config (PIC)")
+        page.setEnabled(False)       # same gating as the other memory pages
+
+    def pic_read(self):
+        # DFM: read config words from the device, show them in the box and
+        # print the values to the info pane.
+        m = ad.avr_locate_mem(self.dev, 'config') if self.dev else None
+        if not m:
+            self.log("Part has no config memory", ad.MSG_ERROR)
+            return
+        if not self.connected:
+            self.log("Not connected to a programmer", ad.MSG_ERROR)
+            return
+        amnt = ad.avr_read_mem(self.pgm, self.dev, m)
+        if amnt is None or amnt < 0:
+            self.memories.pic_buffer.setText("read error")
+            self.log("Config read failed", ad.MSG_ERROR)
+            return
+        words = self._config_words_from_buffer(m)
+        self._set_config_box(words)
+        txt = self._config_words_to_text(words)
+        detail = "  ".join(f"CONFIG{i+1}=0x{w:04X}" for i, w in enumerate(words))
+        self.log(f"Config 读回: {txt}   [{detail}]")
+        self.memories.pic_buffer.setText(f"读回 {len(words)} 个 config 字: {txt}")
+
+    def pic_program(self):
+        # DFM: burn exactly what is in the Config box (write + read-back
+        # verify on implemented bits); no whole-chip erase here.
+        m = ad.avr_locate_mem(self.dev, 'config') if self.dev else None
+        if not m:
+            self.log("Part has no config memory", ad.MSG_ERROR)
+            return
+        nw = int(m.size) // 2
+        words = self._config_box_words()
+        if len(words) != nw:
+            self.log(f"Config 字数量不对：期望 {nw} 个，当前 {len(words)} 个", ad.MSG_ERROR)
+            self.memories.pic_buffer.setText(f"需要 {nw} 个 config 字，当前 {len(words)} 个")
+            return
+        image = self._config_words_to_image(words, m)
+        m.clear(m.size)
+        m.put(image)
+        self.log(">> Program config: " + self._config_words_to_text(words))
+        if self._write_mem_verify(m, int(m.size), "Config", do_erase=False):
+            self.memories.pic_buffer.setText(
+                "烧录 OK: " + self._config_words_to_text(words))
+        else:
+            self.memories.pic_buffer.setText("烧录失败（见日志）")
+
+    def pic_clear(self):
+        # DFM: Clear sets the config words to their default value, which is
+        # currently the per-word config_maskN from picdude.conf.
+        m = ad.avr_locate_mem(self.dev, 'config') if self.dev else None
+        if not m:
+            self.log("Part has no config memory", ad.MSG_ERROR)
+            return
+        words = self._config_default_words()
+        self._set_config_box(words)
+        image = self._config_words_to_image(words, m)
+        m.clear(m.size)
+        m.put(image)
+        txt = self._config_words_to_text(words)
+        self.memories.pic_buffer.setText("已置默认(config_mask): " + txt)
+        self.log("Config 置为默认(config_mask): " + txt)
+
     def read_signature(self):
-        self.log(">> avr_read_mem(pgm, dev, signature)   # 读签名")
+        # DFM: PIC parts use a 16-bit chip id instead of the AVR signature.
         if self.darkmode:
             sig_ok = "background-color: rgb(0, 0, 0);\ncolor: rgb(0, 150, 0);"
             sig_bad = "background-color: rgb(0, 0, 0);\ncolor: rgb(200, 80, 0);"
         else:
             sig_ok = "background-color: rgb(255, 255, 255);\ncolor: rgb(0, 100, 0);"
             sig_bad = "background-color: rgb(255, 255, 255);\ncolor: rgb(150, 0, 0);"
-        if self.connected:
-            m = ad.avr_locate_mem(self.dev, 'signature')
-            if m:
-                ad.avr_read_mem(self.pgm, self.dev, m)
-                self.reset_progress() # clear progress bar
-                read_sig = m.get(3)
-                if read_sig == self.dev.signature:
-                    self.memories.deviceSig.setStyleSheet(sig_ok)
-                else:
-                    self.memories.deviceSig.setStyleSheet(sig_bad)
-                    self.log("Signature read from device does not match config file",
-                             ad.MSG_WARNING)
-                self.memories.flash.setEnabled(True)
-                self.memories.eeprom.setEnabled(True)
-                self.memories.fuses.setEnabled(True)
-                sigstr = read_sig.hex(' ').upper()
-                self.memories.deviceSig.setText(sigstr)
-                p = ad.locate_part_by_signature(ad.cvar.part_list, read_sig)
-                if p:
-                    self.memories.candidate.setText(p.desc)
-                else:
-                    self.memories.candidate.setText("???")
+        if not self.connected:
+            self.log("Not connected to a programmer", ad.MSG_ERROR)
+            return
+        p = self.dev
+        if p is None:
+            return
+
+        if (p.desc or '').startswith('PIC'):
+            if p.deviceid_addr == 0 or p.deviceid_expected == 0:
+                # Baseline PIC parts have no chip id: nothing to verify
+                self.memories.deviceSig.setStyleSheet(sig_ok)
+                self.memories.deviceSig.setText("n/a (baseline)")
+                self.memories.candidate.setText(p.desc)
+                self.log("PIC baseline part: no chip id, identity check skipped",
+                         ad.MSG_INFO)
+                self._unlock_memory_pages()
+                return
+            self.log(">> avrdude_pic_read_chipid(pgm, dev)   # 读 16 位 chip id")
+            try:
+                val = ad.avrdude_pic_read_chipid(self.pgm, p)
+            except Exception as e:
+                val = -1
+                self.log(f"PIC chip id read failed: {e}", ad.MSG_ERROR)
+            if val is None or val < 0:
+                self.memories.deviceSig.setStyleSheet(sig_bad)
+                self.memories.deviceSig.setText("read error")
+                self.log("PIC chip id read failed (no target response?)", ad.MSG_ERROR)
+                return
+            mask = int(p.deviceid_mask)
+            expected = int(p.deviceid_expected)
+            if (val & mask) == (expected & mask):
+                self.memories.deviceSig.setStyleSheet(sig_ok)
+                self.memories.deviceSig.setText(f"0x{val:04X} OK")
+                self.memories.candidate.setText(p.desc)
+                self.log(f"PIC chip id verified: 0x{val:04X} "
+                         f"(expect 0x{expected:04X}, mask 0x{mask:04X})", ad.MSG_INFO)
+                self._unlock_memory_pages()
             else:
-                ad.log("Could not find signature memory", ad.MSG_ERROR)
+                self.memories.deviceSig.setStyleSheet(sig_bad)
+                self.memories.deviceSig.setText(f"0x{val:04X} MISMATCH")
+                self.memories.candidate.setText("???")
+                self.log(f"PIC chip id MISMATCH: read 0x{val:04X}, "
+                         f"expect 0x{expected:04X}, mask 0x{mask:04X}; "
+                         f"programming stays locked", ad.MSG_ERROR)
+            return
+
+        # --- AVR part: unchanged legacy behaviour ---
+        self.log(">> avr_read_mem(pgm, dev, signature)   # 读签名")
+        m = ad.avr_locate_mem(self.dev, 'signature')
+        if not m:
+            self.log("Could not find signature memory", ad.MSG_ERROR)
+            return
+        ad.avr_read_mem(self.pgm, self.dev, m)
+        self.reset_progress() # clear progress bar
+        read_sig = m.get(3)
+        if read_sig == self.dev.signature:
+            self.memories.deviceSig.setStyleSheet(sig_ok)
+        else:
+            self.memories.deviceSig.setStyleSheet(sig_bad)
+            self.log("Signature read from device does not match config file",
+                     ad.MSG_WARNING)
+        self.memories.flash.setEnabled(True)
+        self.memories.eeprom.setEnabled(True)
+        self.memories.fuses.setEnabled(True)
+        sigstr = read_sig.hex(' ').upper()
+        self.memories.deviceSig.setText(sigstr)
+        p = ad.locate_part_by_signature(ad.cvar.part_list, read_sig)
+        if p:
+            self.memories.candidate.setText(p.desc)
+        else:
+            self.memories.candidate.setText("???")
 
     def ask_flash_file(self):
         dlg = QFileDialog(caption = "Select file",
@@ -1215,6 +1585,11 @@ class adgui(QObject):
                 self.memories.ffSrec.setChecked(True)
             elif fname.endswith('.bin'):
                 self.memories.ffRbin.setChecked(True)
+
+        # DFM: PIC hex files carry their config words in the config window;
+        # show them in the Config box as soon as a hex is loaded/selected.
+        if self.dev is not None and (self.dev.desc or '').startswith('PIC'):
+            self._config_load_from_hex(fname)
 
     def flash_read(self):
         self.log(">> avr_read_mem(pgm, dev, flash)   # 全片读回")
@@ -1262,9 +1637,44 @@ class adgui(QObject):
                 rd = -1
                 actual = None
             m.put(expected)             # 恢复缓冲区（重试时写回正确数据）
-            if rd >= 0 and actual == expected:
+            # DFM: compare 14-bit PIC word memories on masked words (an erased
+            # word is 0x3FFF; hex files often carry 0xFFFF); config words are
+            # additionally compared only on their implemented bits; all other
+            # memories (AVR, PIC eeprom) stay byte-for-byte
+            if self._is_pic_word_mem(memname):
+                ea = self._pic_word_norm(expected)
+                ga = self._pic_word_norm(actual)
+            else:
+                ea = expected
+                ga = actual
+            if str(memname).lower() == 'config' and ea is not None and ga is not None:
+                eq_ok, mbi = self._config_word_eq(ea, ga)
+            else:
+                eq_ok = (ea == ga)
+                mbi = None
+            if rd >= 0 and eq_ok:
                 self.log(f"{memname} programmed and verified OK (attempt {attempt}/{max_attempts}, {amnt} bytes)")
                 return True
+            # DFM: show WHERE/WHAT mismatches so data-mapping problems (word/
+            # byte layout, implemented-bit masks, offsets) are told apart from
+            # real write failures
+            if ga is not None and ea is not None:
+                i = mbi
+                if i is None and len(ea) == len(ga):
+                    ncmp = len(ea)
+                    for j in range(ncmp):
+                        if ga[j] != ea[j]:
+                            i = j
+                            break
+                if i is not None:
+                    w0 = max(0, i - 2)
+                    self.log(f"{memname} first mismatch @0x{i:X}: expected 0x{ea[i]:02X}, got 0x{ga[i]:02X} (len expected/actual {len(ea)}/{len(ga)})", ad.MSG_WARNING)
+                    self.log("  exp window: " + " ".join(f"{x:02X}" for x in ea[w0:i+3]), ad.MSG_WARNING)
+                    self.log("  got window: " + " ".join(f"{x:02X}" for x in ga[w0:i+3]), ad.MSG_WARNING)
+                else:
+                    self.log(f"{memname} verify mismatch: byte lengths differ, expected/actual {len(ea)}/{len(ga)}", ad.MSG_WARNING)
+            else:
+                self.log(f"{memname} verify mismatch: read-back returned rc={rd}", ad.MSG_WARNING)
             self.log(f"{memname} verify mismatch (attempt {attempt}/{max_attempts}), retrying ...", ad.MSG_WARNING)
 
         self.log(f"{memname} programming failed after {max_attempts} attempts", ad.MSG_ERROR)
@@ -1272,6 +1682,12 @@ class adgui(QObject):
         return False
 
     def flash_write(self):
+        # DFM: PIC hex files usually carry several memory regions (flash,
+        # config, sometimes eeprom/userid). Program everything the file really
+        # contains in one go; AVR keeps the classic flash-only behaviour.
+        if self.dev is not None and (self.dev.desc or '').startswith('PIC'):
+            self.program_pic_hex_all()
+            return
         self.adgui.progressBar.setEnabled(True)
         m = ad.avr_locate_mem(self.dev, 'flash')
         if not m:
@@ -1281,6 +1697,136 @@ class adgui(QObject):
             self.log("No data to write into 'flash' memory", ad.MSG_WARNING)
             return
         self._write_mem_verify(m, self.flash_size, "Flash", do_erase=True)
+
+    def _hex_flat_map(self, fname):
+        # DFM: parse an Intel HEX file into a flat byte-address map plus the
+        # set of "allocated" addresses (same data model as fileio.c's "any"
+        # buffer + TAG_ALLOCATED).
+        data = {}
+        alloc = set()
+        base = 0
+        try:
+            fp = open(fname, "r", errors="ignore")
+        except OSError as e:
+            self.log(f"Cannot open hex file {fname}: {e}", ad.MSG_ERROR)
+            return None, None
+        with fp:
+            for ln in fp:
+                ln = ln.strip()
+                if not ln or ln[0] != ":":
+                    continue
+                try:
+                    n = int(ln[1:3], 16)
+                    a = int(ln[3:7], 16)
+                    t = int(ln[7:9], 16)
+                    raw = bytes.fromhex(ln[9:9 + 2 * n])
+                except Exception:
+                    continue
+                if t == 0:
+                    for i, v in enumerate(raw):
+                        data[base + a + i] = v
+                        alloc.add(base + a + i)
+                elif t == 1:
+                    break
+                elif t == 4:
+                    base = int.from_bytes(raw[:2], "big") << 16
+                elif t == 2:
+                    base = int.from_bytes(raw[:2], "big") << 4
+        return data, alloc
+
+    def _pic_region_bytes(self, data, alloc, memname):
+        # DFM: exact mirror of update.c update_mem_from_all() window rules:
+        #   flash:        buf[i] = file[i]                (offset 0)
+        #   userid/config:buf[i] = file[off + i]
+        #   eeprom:       buf[i] = file[off + 2*i]        (low byte, even addr)
+        # Images are 0xff-initialised; returns (image, top) or (None, 0).
+        m = ad.avr_locate_mem(self.dev, memname) if self.dev else None
+        if m is None:
+            return None, 0
+        size = int(m.size)
+        off = int(m.offset)
+        image = bytearray([0xFF]) * size
+        top = 0
+        if memname == "eeprom":
+            for i in range(size):
+                a = off + 2 * i
+                if a in alloc:
+                    image[i] = data.get(a, 0xFF)
+                    top = i + 1
+        else:
+            base = 0 if memname == "flash" else off
+            for i in range(size):
+                a = base + i
+                if a in alloc:
+                    image[i] = data.get(a, 0xFF)
+                    top = i + 1
+        return bytes(image), top
+
+    def program_pic_hex_all(self):
+        """DFM: PIC one-shot programming from the loaded hex file.
+
+        Follows avrdude's own PIC expand path (update.c): a "-U flash:w:file"
+        on a PIC expands to flash,eeprom,userid,config and programs every
+        region the file really contains, writing config words last. Windows
+        and address rules mirror update_mem_from_all(), i.e. regions are found
+        by the file's true physical addresses - not by fileio's 0-based
+        single-memory read (which ignores mem->offset below 8 MiB).
+        """
+        if not self.flashname:
+            self.log("No hex file loaded for full-hex programming", ad.MSG_WARNING)
+            return
+        if not self.connected:
+            self.log("Not connected to a programmer", ad.MSG_ERROR)
+            return
+        data, alloc = self._hex_flat_map(self.flashname)
+        if data is None:
+            return
+        self.log(">> program_pic_hex_all: split hex by memory windows "
+                 "(flash,eeprom,userid,config)")
+        if self.pgm.chip_erase(self.dev) != 0:
+            self.log("Chip erase failed, aborting full-hex programming", ad.MSG_ERROR)
+            return
+        done = 0
+        for memname, cap in (("flash", "Flash"), ("eeprom", "EEPROM"),
+                             ("userid", "UserID"), ("config", "Config")):
+            m = ad.avr_locate_mem(self.dev, memname) if self.dev else None
+            if m is None:
+                continue
+            if memname == "config":
+                wbox = self._config_box_words()
+                if len(wbox) == int(m.size) // 2:
+                    # DFM: the user may have edited the Config box; burn that
+                    image = self._config_words_to_image(wbox, m)
+                    top = int(m.size)
+                    self.log("Config: using the values from the Config box")
+                else:
+                    image, top = self._pic_region_bytes(data, alloc, memname)
+            else:
+                image, top = self._pic_region_bytes(data, alloc, memname)
+            if image is None or top <= 0:
+                self.log(f"{cap}: hex has no data in its window, skipped", ad.MSG_NOTICE)
+                continue
+            m.clear(m.size)
+            m.put(image[:top])       # store and tag the bytes we will write
+            self.log(f"{cap}: {top} bytes from hex -> write + verify")
+            if not self._write_mem_verify(m, top, cap, do_erase=False):
+                self.log(f"{cap} programming failed; full-hex programming aborted",
+                         ad.MSG_ERROR)
+                return
+            done += 1
+            if memname == "flash":
+                self.flash_size = top
+                self.update_flash_buffer_view(top)
+            elif memname == "config":
+                words = [(image[2*i] | (image[2*i + 1] << 8)) & 0x3FFF
+                         for i in range(len(image) // 2)]
+                self._set_config_box(words)
+                self.memories.pic_buffer.setText(
+                    "programmed: " + self._config_words_to_text(words))
+        if done:
+            self.log(f"Full-hex programming done: {done} region(s) programmed and verified")
+        else:
+            self.log("No memory region found in the hex file", ad.MSG_WARNING)
 
     def clear_flash_buffer(self):
         m = ad.avr_locate_mem(self.dev, 'flash')
