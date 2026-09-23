@@ -149,8 +149,9 @@ jobs:
 
   linux:
     runs-on: ubuntu-latest
-    container: debian:11
+    container: debian:12
     strategy:
+      fail-fast: false
       matrix:
         include:
           - { arch: i386, processor: i686, prefix: i686-linux-gnu, inc-lib: i386-linux-gnu }

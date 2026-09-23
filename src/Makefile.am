@@ -103,6 +103,8 @@ libavrdude_la_SOURCES = \
 	avrintel.c \
 	libavrdude-avrintel.h \
 	avrpart.c \
+	avrpart_icsp.c \
+	avrpart_icsp.h \
 	avr_opcodes.c \
 	bitbang.c \
 	bitbang.h \
@@ -154,6 +156,8 @@ libavrdude_la_SOURCES = \
 	par.h \
 	pgm.c \
 	pgm_type.c \
+	picpart.c \
+	picpart.h \
 	pickit2.c \
 	pickit2.h \
 	pickit5_lut_dw.c \
@@ -172,6 +176,7 @@ libavrdude_la_SOURCES = \
 	serbb_posix.c \
 	serbb_win32.c \
 	ser_avrdoper.c \
+	ser_avrdoper_winusb.c \
 	ser_posix.c \
 	ser_win32.c \
 	serialadapter.c \

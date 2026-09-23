@@ -14,6 +14,7 @@
 #include <objbase.h>
 #include <setupapi.h>
 #include <usbiodef.h>
+#include <usb.h>
 #include <winusb.h>
 #include <wchar.h>
 #include <wctype.h>
