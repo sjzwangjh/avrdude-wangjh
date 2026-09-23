@@ -159,17 +159,23 @@ add_custom_command(
     VERBATIM
     )
 
-# Copy the PIC device configuration (picdude.conf) next to avrdude.conf
+# Copy PIC device definitions next to avrdude.conf.  The source files are
+# dependencies, so CMake refreshes these copies when a newer definition is built.
 add_custom_command(
-    OUTPUT picdude.conf
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    OUTPUT picdude.conf pic10-12-16-init.xml
+    COMMAND ${CMAKE_COMMAND} -E copy
         "${CMAKE_CURRENT_SOURCE_DIR}/picdude.conf"
         "${CMAKE_CURRENT_BINARY_DIR}/picdude.conf"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/picdude.conf"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${CMAKE_CURRENT_SOURCE_DIR}/pic10-12-16-init.xml"
+        "${CMAKE_CURRENT_BINARY_DIR}/pic10-12-16-init.xml"
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/picdude.conf"
+        "${CMAKE_CURRENT_SOURCE_DIR}/pic10-12-16-init.xml"
     VERBATIM
     )
 
-add_custom_target(conf ALL DEPENDS avrdude.conf picdude.conf)
+add_custom_target(conf ALL DEPENDS avrdude.conf picdude.conf pic10-12-16-init.xml)
 
 # =====================================
 # Project
