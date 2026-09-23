@@ -15,8 +15,8 @@
 #include <setupapi.h>
 #include <usbiodef.h>
 
-/* libusb-compat shadows the Windows usb.h in the MinGW Clang build. */
-#if defined(__MINGW32__) && defined(__clang__)
+/* libusb-compat shadows the Windows usb.h in MinGW and Clang builds. */
+#if defined(__MINGW32__) && (!defined(__MINGW_USE_UCRT) || defined(__clang__))
 typedef enum _USBD_PIPE_TYPE {
   UsbdPipeTypeControl,
   UsbdPipeTypeIsochronous,
