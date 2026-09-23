@@ -14,7 +14,23 @@
 #include <objbase.h>
 #include <setupapi.h>
 #include <usbiodef.h>
-#include <usb.h>
+
+/* libusb-compat shadows the Windows usb.h in the MinGW Clang build. */
+#if defined(__MINGW32__) && defined(__clang__)
+typedef enum _USBD_PIPE_TYPE {
+  UsbdPipeTypeControl,
+  UsbdPipeTypeIsochronous,
+  UsbdPipeTypeBulk,
+  UsbdPipeTypeInterrupt
+} USBD_PIPE_TYPE;
+typedef LONG USBD_STATUS;
+typedef struct _USBD_ISO_PACKET_DESCRIPTOR {
+  ULONG Offset;
+  ULONG Length;
+  USBD_STATUS Status;
+} USBD_ISO_PACKET_DESCRIPTOR, *PUSBD_ISO_PACKET_DESCRIPTOR;
+#endif
+
 #include <winusb.h>
 #include <wchar.h>
 #include <wctype.h>
