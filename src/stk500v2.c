@@ -2059,8 +2059,8 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       unsigned int mode = 0;
       int sscanf_success = sscanf(extended_param, "workmode=%u", &mode);
 
-      if(sscanf_success < 1 || mode < 1 || mode > 2) {
-        pmsg_error("invalid value in -x %s; use -x workmode=<1..2>\n", extended_param);
+      if(sscanf_success < 1 || (mode != 1 && mode != 2 && mode != 4)) {
+        pmsg_error("invalid value in -x %s; use -x workmode=<1|2|4>\n", extended_param);
         rv = -1;
         break;
       }
@@ -2171,7 +2171,7 @@ static int stk500v2_parseextparms(const PROGRAMMER *pgm, const LISTID extparms) 
       msg_error("  -x fosc=off       Switch the oscillator clock off\n");
     }
     msg_error("  -x xtal=<n>[unit] Set programmer xtal frequency to <n> Hz (or kHz/MHz)\n");
-    msg_error("  -x workmode=<1..2> Set DFM work mode: 1 online, 2 record offline data (no target programming)\n");
+    msg_error("  -x workmode=<1|2|4> Set DFM work mode: 1 online, 2 record offline data, 4 read active offline package\n");
     msg_error("  -x appinfo        Show connected DFM programmer and App image information\n");
     msg_error("  -x offline=info   Show DFM offline package count and active index\n");
     msg_error("  -x offline=list   List DFM offline package summaries\n");
@@ -2602,6 +2602,8 @@ static const char *stk500v2_workmode_name(unsigned char mode) {
     return "record offline data";
   case 3:
     return "online + record offline data";
+  case 4:
+    return "read active offline package";
   default:
     return "unknown";
   }
@@ -2610,7 +2612,7 @@ static const char *stk500v2_workmode_name(unsigned char mode) {
 static int stk500v2_set_state(const PROGRAMMER *pgm, unsigned char mode) {
   unsigned char buf[32];
 
-  if(mode > 3) {
+  if(mode > 4) {
     pmsg_error("invalid DFM work mode %u\n", mode);
     return -1;
   }
@@ -3986,6 +3988,10 @@ static int stk500v2_set_vtarget(const PROGRAMMER *pgm, double v) {
   unsigned char uaref = 0;
   unsigned char utarg = (unsigned) ((v + 0.049)*10);
 
+  // DFM ICSP repurposes Varef as independent high-voltage VPP.
+  if(str_eq(pgm->ptyp, "STK500ICSP"))
+    return stk500v2_setparm(pgm, PARAM_VTARGET, utarg);
+
   if(stk500v2_getparm(pgm, PARAM_VADJUST, &uaref) != 0) {
     pmsg_error("cannot obtain V[aref]\n");
     return -1;
@@ -4007,6 +4013,10 @@ static int stk500v2_get_vtarget(const PROGRAMMER *pgm, double *v) {
 static int stk500v2_set_varef(const PROGRAMMER *pgm, unsigned int chan, double v) {
   unsigned char utarg = 0;
   unsigned char uaref = (unsigned) ((v + 0.049)*10);
+
+  // DFM ICSP uses Varef as VPP, which is intentionally independent of VDD.
+  if(str_eq(pgm->ptyp, "STK500ICSP"))
+    return stk500v2_setparm(pgm, PARAM_VADJUST, uaref);
 
   if(stk500v2_getparm(pgm, PARAM_VTARGET, &utarg) != 0) {
     pmsg_error("cannot obtain V[target]\n");
@@ -5792,6 +5802,12 @@ void stk500icsp_initpgm(PROGRAMMER *pgm) {
   pgm->setup = stk500v2_setup;
   pgm->teardown = stk500v2_teardown;
   pgm->page_size = 256;
+
+  // Vtarget/Varef are repurposed as independent VDD/VPP controls on DFM ICSP.
+  pgm->set_vtarget = stk500v2_set_vtarget;
+  pgm->get_vtarget = stk500v2_get_vtarget;
+  pgm->set_varef = stk500v2_set_varef;
+  pgm->get_varef = stk500v2_get_varef;
 }
 
 const char stk500v2_jtagmkII_desc[] = "Atmel JTAG ICE mkII in ISP mode";

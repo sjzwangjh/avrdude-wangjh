@@ -1720,6 +1720,7 @@ programmer # stk500icsp
     desc                   = "avrdoper in PIC ICSP programming mode";
     type                   = "stk500icsp";
     prog_modes             = PM_ISP;
+    extra_features         = HAS_VTARG_ADJ | HAS_VTARG_READ | HAS_VAREF_ADJ;
     connection_type        = serial;
 ;
 
